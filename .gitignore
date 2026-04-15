@@ -1,0 +1,10 @@
+.DS_Store
+.env
+.venv/
+__pycache__/
+*.pyc
+out/
+data/
+notion_dupe_plan.csv
+.incremental_sync_state.json
+*.snapshot.csv

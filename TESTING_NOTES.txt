@@ -1,0 +1,9 @@
+Tested locally in mock mode against uploaded /mnt/data/full.csv plus a synthetic sidecar CSV shaped like everything.csv containing only id and member_distance.
+Verified:
+- prepare_input.py builds prepared_scoring_input.csv with Raw ID key and expanded 1/2/3 position/org fields
+- Alumni Signal recomputed to Cal+CBS / Cal / CBS / NULL
+- Mutual Count normalized to integer
+- Distance rehydration from sidecar mapping works and defaults to 3 when not found
+- score_openrouter.py writes scores_raw.csv keyed by Raw ID
+- build_delta.py maps scores back to full.csv by Raw ID
+- timeout/backoff code path is present; live OpenRouter timeout behavior not exercised in this environment
