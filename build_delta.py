@@ -12,18 +12,10 @@ def same_score(a, b) -> bool:
         return str(a).strip() == str(b).strip()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--full", required=True)
-    ap.add_argument("--prepared", required=True)
-    ap.add_argument("--scores", required=True)
-    ap.add_argument("--out", required=True)
-    args = ap.parse_args()
-
-    ensure_dir(args.out)
-    full = pd.read_csv(args.full, dtype={"Raw ID": str, "Best Email": str}, low_memory=False)
-    prepared = pd.read_csv(args.prepared, dtype={"Match Key": str, "Raw ID": str, "Best Email": str}, low_memory=False)
-    scores = pd.read_csv(args.scores, dtype={"Match Key": str, "Raw ID": str, "Best Email": str}, low_memory=False)
+def load_scoring_frames(full_path: str, prepared_path: str, scores_path: str):
+    full = pd.read_csv(full_path, dtype={"Raw ID": str, "Best Email": str}, low_memory=False)
+    prepared = pd.read_csv(prepared_path, dtype={"Match Key": str, "Raw ID": str, "Best Email": str}, low_memory=False)
+    scores = pd.read_csv(scores_path, dtype={"Match Key": str, "Raw ID": str, "Best Email": str}, low_memory=False)
     if scores.empty:
         raise SystemExit("No scored rows found to build delta.")
 
@@ -37,6 +29,10 @@ def main():
 
     scores["Match Key"] = scores["Match Key"].map(normalize_key)
     scores = scores[scores["Match Key"] != ""].copy().drop_duplicates(subset=["Match Key"], keep="last")
+    return full, prepared, scores
+
+
+def build_scoring_frames(full, prepared, scores, include_all: bool = False):
     merged = full.merge(prepared, on="Match Key", how="inner", suffixes=("", "_prepared"))
     merged = merged.merge(scores, on="Match Key", how="inner", suffixes=("", "_score"))
     if merged.empty:
@@ -82,14 +78,33 @@ def main():
         RAW_SCORE_COLUMNS["ft_persona"]: merged["ft_persona"],
         RAW_SCORE_COLUMNS["allocator"]: merged["allocator"],
         RAW_SCORE_COLUMNS["access"]: merged["access"],
-    })[changed_mask]
+    })
+    if not include_all:
+        delta = delta[changed_mask]
+
+    summary = pd.DataFrame({
+        "metric": ["deduped_full_rows", "scored_rows", "changed_rows"],
+        "value": [len(output), len(merged), int(changed_mask.sum())],
+    })
+    return output, merged, delta, summary, changed_mask
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--full", required=True)
+    ap.add_argument("--prepared", required=True)
+    ap.add_argument("--scores", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--include-all", action="store_true")
+    args = ap.parse_args()
+
+    ensure_dir(args.out)
+    full, prepared, scores = load_scoring_frames(args.full, args.prepared, args.scores)
+    output, merged, delta, summary, changed_mask = build_scoring_frames(full, prepared, scores, include_all=args.include_all)
 
     delta.to_csv(f"{args.out}/delta_updates.csv", index=False)
     output.to_csv(f"{args.out}/full_with_new_raw_scores.csv", index=False)
-    pd.DataFrame({
-        "metric": ["deduped_full_rows", "scored_rows", "changed_rows"],
-        "value": [len(output), len(merged), int(changed_mask.sum())],
-    }).to_csv(f"{args.out}/delta_summary.csv", index=False)
+    summary.to_csv(f"{args.out}/delta_summary.csv", index=False)
 
     print(f"Wrote {args.out}/delta_updates.csv")
     print(f"Wrote {args.out}/full_with_new_raw_scores.csv")

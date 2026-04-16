@@ -339,7 +339,10 @@ def notion_set_payload(prop_type: str, value: Any) -> Dict[str, Any]:
             return {"number": None}
         return {"number": int(value)}
     if prop_type == "rich_text":
-        return {"rich_text": [{"type": "text", "text": {"content": str(int(value))}}]}
+        text = normalize_text(value)
+        if not text:
+            return {"rich_text": []}
+        return {"rich_text": [{"type": "text", "text": {"content": text}}]}
     if prop_type == "select":
         name = normalize_text(value)
         if not name:

@@ -8,3 +8,4 @@ data/
 notion_dupe_plan.csv
 .incremental_sync_state.json
 *.snapshot.csv
+.compound-engineering/*.local.yaml

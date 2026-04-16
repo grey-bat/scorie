@@ -1,14 +1,20 @@
 import argparse
+import json
 import os
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from pathlib import Path
+import threading
 from typing import Dict, Optional
 
 import pandas as pd
 import requests
 from dotenv import load_dotenv
 
-from utils import RAW_SCORE_COLUMNS, ensure_dir, notion_plain_text, notion_set_payload, normalize_key, normalize_email
+from utils import RAW_SCORE_COLUMNS, ensure_dir, notion_plain_text, notion_set_payload, normalize_key, normalize_email, normalize_text
+from writeback_status import build_writeback_status, now_iso, write_json_atomic
 
 NOTION_VERSION = os.getenv("NOTION_VERSION", "2026-03-11")
 
@@ -21,6 +27,7 @@ class NotionClient:
         connect_timeout: float = 15.0,
         read_timeout: float = 45.0,
         retries: int = 5,
+        rate_limiter=None,
     ):
         self.s = requests.Session()
         self.s.headers.update({
@@ -32,8 +39,12 @@ class NotionClient:
         self.last_call = 0.0
         self.timeout = (connect_timeout, read_timeout)
         self.retries = retries
+        self.rate_limiter = rate_limiter
 
     def _pace(self):
+        if self.rate_limiter is not None:
+            self.rate_limiter.wait()
+            return
         elapsed = time.time() - self.last_call
         if elapsed < self.min_interval:
             time.sleep(self.min_interval - elapsed)
@@ -85,6 +96,22 @@ class NotionClient:
         return r.json()
 
 
+class SharedRateLimiter:
+    def __init__(self, min_interval: float):
+        self.min_interval = min_interval
+        self.lock = threading.Lock()
+        self.next_allowed_at = 0.0
+
+    def wait(self):
+        with self.lock:
+            now = time.time()
+            target = max(now, self.next_allowed_at)
+            self.next_allowed_at = target + self.min_interval
+        sleep_for = target - now
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+
+
 def resolve_data_source_id(client: NotionClient, explicit_data_source_id: Optional[str], database_id: Optional[str]) -> str:
     if explicit_data_source_id:
         return explicit_data_source_id
@@ -97,9 +124,10 @@ def resolve_data_source_id(client: NotionClient, explicit_data_source_id: Option
     return data_sources[0]["id"]
 
 
-def query_all_pages(client: NotionClient, data_source_id: str):
+def query_all_pages(client: NotionClient, data_source_id: str, on_page=None):
     pages = []
     cursor = None
+    loaded_pages = 0
     while True:
         payload = {"page_size": 100}
         if cursor:
@@ -114,6 +142,9 @@ def query_all_pages(client: NotionClient, data_source_id: str):
                     continue
                 raise
         pages.extend(data.get("results", []))
+        loaded_pages += 1
+        if on_page is not None:
+            on_page(loaded_pages, len(pages))
         cursor = data.get("next_cursor")
         if not data.get("has_more"):
             break
@@ -178,6 +209,93 @@ def lookup_pages_by_property_values(client: NotionClient, data_source_id: str, p
     return cache
 
 
+def _payload_rich_text_content(payload: dict) -> str:
+    return "".join([part.get("text", {}).get("content", "") for part in payload.get("rich_text", [])])
+
+
+def page_matches_payload(page: dict, payload: dict, target_types: Dict[str, str]) -> bool:
+    properties = page.get("properties", {})
+    desired_properties = payload.get("properties", {})
+    for name, desired in desired_properties.items():
+        prop_type = target_types[name]
+        current = properties.get(name, {})
+        if prop_type == "number":
+            if current.get("number") != desired.get("number"):
+                return False
+            continue
+        if prop_type == "rich_text":
+            if normalize_text(notion_plain_text(current)) != normalize_text(_payload_rich_text_content(desired)):
+                return False
+            continue
+        if prop_type == "select":
+            current_select = current.get("select") or {}
+            desired_select = desired.get("select") or {}
+            if normalize_text(current_select.get("name")) != normalize_text(desired_select.get("name")):
+                return False
+            continue
+        if prop_type == "status":
+            current_status = current.get("status") or {}
+            desired_status = desired.get("status") or {}
+            if normalize_text(current_status.get("name")) != normalize_text(desired_status.get("name")):
+                return False
+            continue
+        raise ValueError(f"Unsupported target property type for comparison: {prop_type}")
+    return True
+
+
+def retryable_notion_error(error: RuntimeError) -> bool:
+    return str(error).startswith("retryable_") or str(error) == "rate_limited"
+
+
+def apply_write_job(client: NotionClient, job: dict) -> dict:
+    page_id = job["page_id"]
+    payload = job["payload"]
+    retries_used = 0
+    local_backoff = 0.5
+    while True:
+        try:
+            client.patch(f"/pages/{page_id}", payload)
+            return {"status": "updated", "retries_used": retries_used}
+        except RuntimeError as e:
+            if retryable_notion_error(e):
+                retries_used += 1
+                time.sleep(local_backoff)
+                local_backoff = min(local_backoff * 1.8, 20.0)
+                continue
+            return {"status": "failed", "error": str(e), "retries_used": retries_used}
+
+
+def duplicate_lookup_rows(cache: Dict[str, list], lookup_type: str) -> list[dict]:
+    rows = []
+    for key in sorted(cache):
+        pages = cache[key]
+        if len(pages) <= 1:
+            continue
+        rows.append({
+            "lookup_type": lookup_type,
+            "lookup_key": key,
+            "match_count": len(pages),
+            "page_ids": ";".join(page.get("id", "") for page in pages if page.get("id")),
+        })
+    return rows
+
+
+def build_match_caches(pages: list[dict], use_raw_id: bool, use_best_email: bool):
+    raw_cache = defaultdict(list)
+    email_cache = defaultdict(list)
+    for page in pages:
+        props = page.get("properties", {})
+        if use_raw_id:
+            raw_key = normalize_key(notion_plain_text(props.get("Raw ID", {})))
+            if raw_key:
+                raw_cache[raw_key].append(page)
+        if use_best_email:
+            email_key = normalize_email(notion_plain_text(props.get("Best Email", {})))
+            if email_key:
+                email_cache[email_key].append(page)
+    return raw_cache, email_cache
+
+
 def main():
     load_dotenv()
     ap = argparse.ArgumentParser()
@@ -188,6 +306,7 @@ def main():
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--apply-batch-size", type=int, default=100)
+    ap.add_argument("--write-workers", type=int, default=None)
     args = ap.parse_args()
 
     ensure_dir(args.out)
@@ -221,70 +340,243 @@ def main():
 
     logs = []
     updated = 0
+    noop = 0
     unmatched = 0
     ambiguous = 0
+    processed_rows = 0
+    retries = 0
+    last_error = None
+    last_success_match_key = None
+    last_success_page_id = None
+    current_row_index = None
+    current_match_key = None
+    current_page_id = None
+    loaded_source_pages = 0
+    loaded_source_rows = 0
+    queued_write_rows = 0
     raw_cache: Dict[str, list] = {}
     email_cache: Dict[str, list] = {}
-    raw_ids = sorted({rid for rid in delta["Raw ID"].tolist() if rid})
-    emails = sorted({email for email in delta["Best Email"].tolist() if email})
-    if raw_prop_type and raw_ids:
-        raw_cache = dict(lookup_pages_by_property_values(client, data_source_id, "Raw ID", raw_prop_type, raw_ids))
-    if email_prop_type and emails:
-        email_cache = dict(lookup_pages_by_property_values(client, data_source_id, "Best Email", email_prop_type, emails))
-    for _, row in delta.iterrows():
-        rid = row["Raw ID"]
-        email = row["Best Email"]
-        page = None
-        if rid:
-            matches = raw_cache.get(rid, [])
-            if len(matches) > 1:
-                logs.append({"Match Key": row.get("Match Key", ""), "status": "ambiguous_raw_id", "page_id": ""})
-                ambiguous += 1
-                continue
-            if matches:
-                page = matches[0]
-        if page is None and email:
-            matches = email_cache.get(email, [])
-            if len(matches) > 1:
-                logs.append({"Match Key": row.get("Match Key", ""), "status": "ambiguous_best_email", "page_id": ""})
-                ambiguous += 1
-                continue
-            if matches:
-                page = matches[0]
-        if page is None:
-            logs.append({"Match Key": row.get("Match Key", ""), "status": "not_found", "page_id": ""})
-            unmatched += 1
-            continue
-        page_id = page["id"]
-        payload = {"properties": {}}
-        for col in required_targets:
-            payload["properties"][col] = notion_set_payload(target_types[col], row[col])
-        if args.dry_run:
-            logs.append({"Match Key": row.get("Match Key", ""), "status": "dry_run", "page_id": page_id})
-            continue
-        while True:
-            try:
-                client.patch(f"/pages/{page_id}", payload)
-                updated += 1
-                logs.append({"Match Key": row.get("Match Key", ""), "status": "updated", "page_id": page_id})
-                break
-            except RuntimeError as e:
-                if str(e).startswith("retryable_") or str(e) == "rate_limited":
-                    time.sleep(2)
-                    continue
-                raise
+    raw_duplicate_rows = []
+    email_duplicate_rows = []
+    duplicate_report_path = None
+    duplicate_lookup_preview = None
+    total_rows = len(delta)
+    print(f"Notion writeback rows needing update: {total_rows}", flush=True)
 
-    pd.DataFrame(logs).to_csv(f"{args.out}/notion_writeback_log.csv", index=False)
-    pd.DataFrame([
-        {"metric": "delta_rows", "value": len(delta)},
-        {"metric": "updated", "value": updated},
-        {"metric": "unmatched", "value": unmatched},
-        {"metric": "ambiguous", "value": ambiguous},
-        {"metric": "raw_id_lookups", "value": len(raw_cache)},
-        {"metric": "best_email_lookups", "value": len(email_cache)},
-    ]).to_csv(f"{args.out}/notion_writeback_summary.csv", index=False)
-    print(f"Wrote {args.out}/notion_writeback_log.csv")
-    print(f"Updated: {updated}, unmatched: {unmatched}, ambiguous: {ambiguous}")
+    status_path = Path(args.out) / "notion_writeback_status.json"
+    started_at = now_iso()
+    started_monotonic = time.monotonic()
+
+    def publish(phase: str, finished_at: Optional[str] = None):
+        snapshot = build_writeback_status(
+            phase=phase,
+            total_rows=total_rows,
+            processed_rows=processed_rows,
+            updated_rows=updated,
+            noop_rows=noop,
+            unmatched_rows=unmatched,
+            ambiguous_rows=ambiguous,
+            retries=retries,
+            elapsed_seconds=time.monotonic() - started_monotonic,
+            started_at=started_at,
+            mode="dry_run" if args.dry_run else "write",
+            current_row_index=current_row_index,
+            current_match_key=current_match_key,
+            current_page_id=current_page_id,
+            loaded_source_pages=loaded_source_pages,
+            loaded_source_rows=loaded_source_rows,
+            queued_write_rows=queued_write_rows,
+            duplicate_report_path=duplicate_report_path,
+            duplicate_lookup_preview=duplicate_lookup_preview,
+            last_error=last_error,
+            last_success_match_key=last_success_match_key,
+            last_success_page_id=last_success_page_id,
+            finished_at=finished_at,
+        )
+        write_json_atomic(status_path, snapshot)
+
+    publish("loading_candidates")
+    terminal_phase = "done"
+    write_jobs = []
+    try:
+        def on_page_loaded(pages_loaded: int, rows_loaded: int):
+            nonlocal loaded_source_pages, loaded_source_rows
+            loaded_source_pages = pages_loaded
+            loaded_source_rows = rows_loaded
+            publish("loading_candidates")
+
+        all_pages = query_all_pages(client, data_source_id, on_page=on_page_loaded)
+        raw_cache, email_cache = build_match_caches(all_pages, raw_prop_type is not None, email_prop_type is not None)
+        raw_duplicate_rows = duplicate_lookup_rows(raw_cache, "Raw ID")
+        email_duplicate_rows = duplicate_lookup_rows(email_cache, "Best Email")
+        duplicate_rows = raw_duplicate_rows + email_duplicate_rows
+        if duplicate_rows:
+            duplicate_report_path = str(Path(args.out) / "notion_writeback_duplicates.csv")
+            pd.DataFrame(duplicate_rows).to_csv(duplicate_report_path, index=False)
+            duplicate_lookup_preview = duplicate_rows[:5]
+            duplicate_message = (
+                f"Duplicate lookup keys detected: {len(raw_duplicate_rows)} raw id keys, "
+                f"{len(email_duplicate_rows)} best email keys. See {duplicate_report_path}"
+            )
+            logs.extend(
+                {
+                    "Match Key": row["lookup_key"],
+                    "status": f"duplicate_{row['lookup_type'].lower().replace(' ', '_')}",
+                    "page_id": row["page_ids"],
+                }
+                for row in duplicate_rows
+            )
+            print(f"Warning: {duplicate_message}", flush=True)
+        publish("matching")
+        for row_number, (_, row) in enumerate(delta.iterrows(), start=1):
+            current_row_index = row_number
+            rid = row["Raw ID"]
+            email = row["Best Email"]
+            current_match_key = row.get("Match Key", "")
+            current_page_id = None
+            page = None
+            # Raw ID is the authoritative disambiguator whenever it exists.
+            if rid:
+                matches = raw_cache.get(rid, [])
+                if len(matches) > 1:
+                    logs.append({"Match Key": row.get("Match Key", ""), "status": "ambiguous_raw_id", "page_id": ""})
+                    ambiguous += 1
+                    processed_rows += 1
+                    last_error = None
+                    publish("matching")
+                    continue
+                if matches:
+                    page = matches[0]
+            if page is None and email:
+                matches = email_cache.get(email, [])
+                if len(matches) > 1:
+                    logs.append({"Match Key": row.get("Match Key", ""), "status": "ambiguous_best_email", "page_id": ""})
+                    ambiguous += 1
+                    processed_rows += 1
+                    last_error = None
+                    publish("matching")
+                    continue
+                if matches:
+                    page = matches[0]
+            if page is None:
+                logs.append({"Match Key": row.get("Match Key", ""), "status": "not_found", "page_id": ""})
+                unmatched += 1
+                processed_rows += 1
+                last_error = None
+                publish("matching")
+                continue
+            page_id = page["id"]
+            current_page_id = page_id
+            payload = {"properties": {}}
+            for col in required_targets:
+                payload["properties"][col] = notion_set_payload(target_types[col], row[col])
+            if page_matches_payload(page, payload, target_types):
+                noop += 1
+                logs.append({"Match Key": row.get("Match Key", ""), "status": "noop", "page_id": page_id})
+                processed_rows += 1
+                last_error = None
+                publish("matching")
+                continue
+            if args.dry_run:
+                logs.append({"Match Key": row.get("Match Key", ""), "status": "dry_run", "page_id": page_id})
+                processed_rows += 1
+                last_error = None
+                publish("matching")
+                continue
+            write_jobs.append({
+                "row_number": row_number,
+                "match_key": row.get("Match Key", ""),
+                "page_id": page_id,
+                "payload": payload,
+            })
+            queued_write_rows = len(write_jobs)
+            publish("writing")
+        if write_jobs:
+            write_workers = args.write_workers
+            if write_workers is None:
+                write_workers = int(os.getenv("NOTION_WRITE_WORKERS", "0") or 0)
+            if write_workers <= 0:
+                write_workers = 4 if len(write_jobs) >= 200 else 1
+            write_workers = max(1, write_workers)
+
+            def record_write_result(job: dict, result: dict):
+                nonlocal updated, processed_rows, retries, last_error, last_success_match_key, last_success_page_id
+                nonlocal current_row_index, current_match_key, current_page_id, queued_write_rows, terminal_phase
+                retries += result["retries_used"]
+                current_row_index = job["row_number"]
+                current_match_key = job["match_key"]
+                current_page_id = job["page_id"]
+                if result["status"] == "updated":
+                    updated += 1
+                    logs.append({"Match Key": job["match_key"], "status": "updated", "page_id": job["page_id"]})
+                    last_success_match_key = job["match_key"]
+                    last_success_page_id = job["page_id"]
+                    processed_rows += 1
+                    last_error = None
+                    queued_write_rows = max(len(write_jobs) - updated, 0)
+                    publish("writing")
+                    return
+                last_error = result["error"]
+                terminal_phase = "failed"
+                publish("failed", finished_at=now_iso())
+                raise RuntimeError(result["error"])
+
+            if write_workers <= 1:
+                for job in write_jobs:
+                    record_write_result(job, apply_write_job(client, job))
+            else:
+                shared_limiter = SharedRateLimiter(min_interval=0.35)
+                worker_local = threading.local()
+
+                def get_worker_client():
+                    worker_client = getattr(worker_local, "client", None)
+                    if worker_client is None:
+                        worker_client = NotionClient(
+                            api_key,
+                            min_interval=0.0,
+                            connect_timeout=15.0,
+                            read_timeout=45.0,
+                            retries=5,
+                            rate_limiter=shared_limiter,
+                        )
+                        worker_local.client = worker_client
+                    return worker_client
+
+                def run_job(job):
+                    return apply_write_job(get_worker_client(), job)
+
+                with ThreadPoolExecutor(max_workers=write_workers) as executor:
+                    for batch in batch_values(write_jobs, args.apply_batch_size):
+                        future_map = {executor.submit(run_job, job): job for job in batch}
+                        for future in as_completed(future_map):
+                            job = future_map[future]
+                            record_write_result(job, future.result())
+        publish("done", finished_at=now_iso())
+    except Exception:
+        terminal_phase = "failed"
+        raise
+    finally:
+        try:
+            pd.DataFrame(logs).to_csv(f"{args.out}/notion_writeback_log.csv", index=False)
+            pd.DataFrame([
+                {"metric": "delta_rows", "value": len(delta)},
+                {"metric": "write_rows", "value": len(write_jobs)},
+                {"metric": "updated", "value": updated},
+                {"metric": "noop", "value": noop},
+                {"metric": "unmatched", "value": unmatched},
+                {"metric": "ambiguous", "value": ambiguous},
+                {"metric": "duplicate_raw_ids", "value": len(raw_duplicate_rows)},
+                {"metric": "duplicate_best_emails", "value": len(email_duplicate_rows)},
+                {"metric": "raw_id_lookups", "value": len(raw_cache)},
+                {"metric": "best_email_lookups", "value": len(email_cache)},
+            ]).to_csv(f"{args.out}/notion_writeback_summary.csv", index=False)
+        except Exception as artifact_error:
+            print(f"Warning: failed to write Notion writeback artifacts: {artifact_error}", flush=True)
+        if terminal_phase == "done":
+            print(f"Wrote {args.out}/notion_writeback_log.csv")
+            print(f"Updated: {updated}, noop: {noop}, unmatched: {unmatched}, ambiguous: {ambiguous}")
+        elif terminal_phase == "failed" and last_error:
+            print(f"Notion writeback stopped: {last_error}")
 
 
 if __name__ == "__main__":
