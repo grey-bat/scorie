@@ -68,6 +68,15 @@ class NotionClient:
             try:
                 response = self.s.request(method, url, json=payload, timeout=self.timeout)
                 return self._handle(response)
+            except RuntimeError as e:
+                if not retryable_notion_error(e):
+                    raise
+                last_error = e
+                if attempt == self.retries:
+                    break
+                print(f"Retrying Notion {method.upper()} {path} after {e} ({attempt}/{self.retries})", flush=True)
+                time.sleep(wait)
+                wait = min(wait * 1.8, 20.0)
             except requests.Timeout as e:
                 last_error = e
                 if attempt == self.retries:

@@ -56,8 +56,8 @@ def build_scoring_frames(full, prepared, scores, include_all: bool = False):
     changed_mask = []
     for _, row in merged.iterrows():
         changed = False
-        changed |= not same_score(row.get("Distance"), row["Degree"])
-        changed |= not same_score(row.get("Alumni Signal"), row.get("Alumni Signal_prepared"))
+        changed |= not same_score(row.get("Degree"), row["Degree"])
+        changed |= not same_score(row.get("Alumni Signal"), row["Alumni Signal_prepared"])
         changed |= not same_score(row.get(RAW_SCORE_COLUMNS["fo_persona"]), row["fo_persona"])
         changed |= not same_score(row.get(RAW_SCORE_COLUMNS["ft_persona"]), row["ft_persona"])
         changed |= not same_score(row.get(RAW_SCORE_COLUMNS["allocator"]), row["allocator"])
