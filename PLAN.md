@@ -7,14 +7,14 @@
 
 ### 🔴 Bugs / Correctness
 
-- [ ] **`build_delta.py` line 59 — wrong change detection for Degree**
-  - `row.get("Distance")` should be `row.get("Degree")` — `Distance` column never exists in `merged`; this means Degree changes are never detected and Notion is never updated when only Degree changes
-  - Fix: change `row.get("Distance")` → `row.get(RAW_SCORE_COLUMNS.get("Degree", "Degree"), row["Degree"])` or compare `row.get("Degree")` to the prepared value directly
+- [x] **`build_delta.py` line 59 — wrong change detection for Degree** ✅ FIXED
+  - Was comparing `row["Degree"]` to itself (always equal). Fixed to compare against `row["Degree_prepared"]` (the merge-suffixed prepared column).
 
-- [ ] **`build_delta.py` line 60 — Alumni Signal change detection always no-op**
-  - `row.get("Alumni Signal")` vs `row.get("Alumni Signal_prepared")` — the `_prepared` suffix column only exists if pandas suffixed it during merge; should use explicit `merged["Alumni Signal_prepared"]` without `.get()` to surface KeyError if schema changes
+- [x] **`build_delta.py` line 60 — Alumni Signal change detection always no-op** ✅ FIXED
+  - Now uses `row["Alumni Signal_prepared"]` directly (no `.get()`) to surface schema changes early.
 
-- [ ] **`update_notion.py` line 91 — rate-limited error re-raises instead of retrying**
+- [x] **`update_notion.py` — rate-limited error re-raises instead of retrying** ✅ ALREADY FIXED
+  - `RuntimeError` is already caught in `_request()` retry loop via `retryable_notion_error()`
   - `_handle()` raises `RuntimeError("rate_limited")` on 429 but `_request()` only catches `requests.Timeout` and `requests.RequestException` — `RuntimeError` propagates out of the retry loop uncaught, meaning a 429 on any non-`query` call terminates the write job
   - Fix: catch `RuntimeError` in `_request()` and retry on `retryable_notion_error()`
 
@@ -42,7 +42,7 @@
 
 ### 🟢 Usability / Ops (PLAN items)
 
-- [ ] Add `.env.example` with all required keys documented
+- [x] Add `.env.example` with all required keys documented ✅ DONE
 - [ ] Verify `scoring_rubric.md` is current — confirm no v4 exists
 - [ ] Add `data/README.md` documenting expected columns in `full.csv` and `everything.csv`
 
