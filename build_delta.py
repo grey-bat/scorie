@@ -39,13 +39,23 @@ def build_scoring_frames(full, prepared, scores, include_all: bool = False):
         raise SystemExit("No matching keys found between deduped full.csv, prepared input, and scores_raw.csv")
 
     output = full.copy()
+    prepared_map = prepared.set_index("Match Key")
     score_map = scores.set_index("Match Key")
     for score_col, target_col in RAW_SCORE_COLUMNS.items():
+        if score_col not in score_map.columns:
+            if target_col not in output.columns:
+                output[target_col] = 0
+            continue
         mapped = output["Match Key"].map(score_map[score_col])
         mask = mapped.notna()
         output.loc[mask, target_col] = mapped[mask].values
+    for col in prepared.columns:
+        if col in {"Match Key"}:
+            continue
+        if col in output.columns:
+            continue
+        output[col] = output["Match Key"].map(prepared_map[col])
 
-    prepared_map = prepared.set_index("Match Key")
     degree_map = output["Match Key"].map(prepared_map["Degree"])
     degree_mask = degree_map.notna()
     output.loc[degree_mask, "Degree"] = degree_map[degree_mask].values
@@ -53,18 +63,34 @@ def build_scoring_frames(full, prepared, scores, include_all: bool = False):
     alumni_mask = alumni_map.notna()
     output.loc[alumni_mask, "Alumni Signal"] = alumni_map[alumni_mask].values
 
+    prepared_degree_col = "Degree_prepared" if "Degree_prepared" in merged.columns else "Degree"
+    prepared_alumni_col = "Alumni Signal_prepared" if "Alumni Signal_prepared" in merged.columns else "Alumni Signal"
+
+    if "company_fit" not in merged.columns:
+        merged["company_fit"] = 0
+    if "weighted_score" not in merged.columns:
+        merged["weighted_score"] = 0
+    if "legacy_weighted_score" not in merged.columns:
+        merged["legacy_weighted_score"] = 0
+    if "score_band" not in merged.columns:
+        merged["score_band"] = ""
+
     changed_mask = []
+    company_fit_supported = "company_fit" in score_map.columns
     for _, row in merged.iterrows():
         changed = False
-        changed |= not same_score(row.get("Degree"), row["Degree_prepared"])
-        changed |= not same_score(row.get("Alumni Signal"), row["Alumni Signal_prepared"])
+        changed |= not same_score(row.get("Degree"), row.get(prepared_degree_col))
+        changed |= not same_score(row.get("Alumni Signal"), row.get(prepared_alumni_col))
         changed |= not same_score(row.get(RAW_SCORE_COLUMNS["fo_persona"]), row["fo_persona"])
         changed |= not same_score(row.get(RAW_SCORE_COLUMNS["ft_persona"]), row["ft_persona"])
         changed |= not same_score(row.get(RAW_SCORE_COLUMNS["allocator"]), row["allocator"])
         changed |= not same_score(row.get(RAW_SCORE_COLUMNS["access"]), row["access"])
+        if company_fit_supported:
+            changed |= not same_score(row.get("Company Fit Score"), row.get("company_fit", ""))
         changed_mask.append(changed)
     changed_mask = pd.Series(changed_mask, dtype=bool)
 
+    zero_series = pd.Series([0] * len(merged), index=merged.index)
     delta = pd.DataFrame({
         "Match Key": merged["Match Key"],
         "Raw ID": merged["Raw ID"],
@@ -73,12 +99,19 @@ def build_scoring_frames(full, prepared, scores, include_all: bool = False):
         "Current Title": merged.get("Current Title", ""),
         "Headline": merged.get("Headline", ""),
         "Degree": merged["Degree"],
-        "Alumni Signal": merged["Alumni Signal_prepared"],
+        "Alumni Signal": merged[prepared_alumni_col] if prepared_alumni_col in merged.columns else merged["Alumni Signal"],
         RAW_SCORE_COLUMNS["fo_persona"]: merged["fo_persona"],
         RAW_SCORE_COLUMNS["ft_persona"]: merged["ft_persona"],
         RAW_SCORE_COLUMNS["allocator"]: merged["allocator"],
         RAW_SCORE_COLUMNS["access"]: merged["access"],
+        RAW_SCORE_COLUMNS["company_fit"]: merged["company_fit"],
+        "weighted_score": merged["weighted_score"] if "weighted_score" in merged.columns else zero_series,
+        "legacy_weighted_score": merged["legacy_weighted_score"] if "legacy_weighted_score" in merged.columns else zero_series,
+        "score_band": merged["score_band"] if "score_band" in merged.columns else pd.Series([""] * len(merged), index=merged.index),
     })
+    for extra_col in ["Company Context Source", "Company Backfill Needed", "Company Backfill Reason", "Company Context Score"]:
+        if extra_col in merged.columns:
+            delta[extra_col] = merged[extra_col]
     if not include_all:
         delta = delta[changed_mask]
 

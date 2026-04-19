@@ -10,8 +10,27 @@ from urllib.parse import unquote
 MODEL_CONTEXT_COLUMNS = [
     "Current Company",
     "Current Title",
-    "Headline",
     "Industry",
+    "Organization 1",
+    "Organization 1 Title",
+    "Organization 1 Description",
+    "Organization 1 Website",
+    "Organization 1 Domain",
+    "Organization 2",
+    "Organization 2 Title",
+    "Organization 2 Description",
+    "Organization 2 Website",
+    "Organization 2 Domain",
+    "Organization 3",
+    "Organization 3 Title",
+    "Organization 3 Description",
+    "Organization 3 Website",
+    "Organization 3 Domain",
+    "Company Context Source",
+    "Company Backfill Needed",
+    "Company Backfill Reason",
+    "Company Context Score",
+    "Headline",
     "Mutual Count",
     "Degree",
     "Summary",
@@ -19,15 +38,6 @@ MODEL_CONTEXT_COLUMNS = [
     "Position 1 Description",
     "Position 2 Description",
     "Position 3 Description",
-    "Organization 1",
-    "Organization 2",
-    "Organization 3",
-    "Organization 1 Title",
-    "Organization 2 Title",
-    "Organization 3 Title",
-    "Organization 1 Description",
-    "Organization 2 Description",
-    "Organization 3 Description",
 ]
 
 PREPARED_OUTPUT_COLUMNS = ["Match Key", "Raw ID", "Best Email", "Full Name", *MODEL_CONTEXT_COLUMNS]
@@ -37,6 +47,7 @@ RAW_SCORE_COLUMNS = {
     "ft_persona": "Persona Signal - Fintech",
     "allocator": "Allocator Score",
     "access": "Access Score",
+    "company_fit": "Company Fit Score",
 }
 
 DISPLAY_COLUMNS = [
@@ -46,6 +57,7 @@ DISPLAY_COLUMNS = [
     ("fo_persona", 4, "FO"),
     ("ft_persona", 4, "FT"),
     ("allocator", 5, "Alloc"),
+    ("company_fit", 5, "CoFit"),
     ("Degree", 6, "Degree"),
     ("access", 6, "Access"),
     ("Headline", 42, "Headline"),
@@ -111,6 +123,29 @@ def truthy_field(value: Any) -> bool:
 def recompute_alumni_signal(berkeley_signal: Any, columbia_signal: Any) -> str:
     has_berkeley = truthy_field(berkeley_signal)
     has_columbia = truthy_field(columbia_signal)
+    if has_berkeley and has_columbia:
+        return "Cal+CBS"
+    if has_berkeley:
+        return "Cal"
+    if has_columbia:
+        return "CBS"
+    return ""
+
+
+def derive_alumni_signal_from_education(row: Dict[str, Any]) -> str:
+    education_blob = " ".join(
+        normalize_text(row.get(col, ""))
+        for col in (
+            "Education 1 School",
+            "Education 2 School",
+            "Education 3 School",
+            "education_1",
+            "education_2",
+            "education_3",
+        )
+    ).lower()
+    has_berkeley = "berkeley" in education_blob or "uc berkeley" in education_blob or "university of california" in education_blob
+    has_columbia = "columbia" in education_blob
     if has_berkeley and has_columbia:
         return "Cal+CBS"
     if has_berkeley:
@@ -328,7 +363,7 @@ def notion_set_payload(prop_type: str, value: Any) -> Dict[str, Any]:
     if prop_type == "number":
         if normalize_text(value) == "":
             return {"number": None}
-        return {"number": int(value)}
+        return {"number": float(value) if "." in normalize_text(value) else int(float(value))}
     if prop_type == "rich_text":
         text = normalize_text(value)
         if not text:

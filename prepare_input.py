@@ -1,7 +1,9 @@
 import argparse
+import os
 from pathlib import Path
 
 import pandas as pd
+from company_backfill import enrich_company_context
 from utils import (
     PREPARED_OUTPUT_COLUMNS,
     MODEL_CONTEXT_COLUMNS,
@@ -9,12 +11,82 @@ from utils import (
     RICHNESS_FIELDS,
     ensure_dir,
     map_distance_label,
+    derive_alumni_signal_from_education,
     normalize_key,
     normalize_email,
     normalize_mutual_count,
-    recompute_alumni_signal,
     canonical_match_key,
 )
+
+
+LH_COLUMN_ALIASES = {
+    "id": "Raw ID",
+    "lh_id": "Raw ID",
+    "profile_url": "LinkedIn URL",
+    "email": "Best Email",
+    "third_party_email_1": "Best Email",
+    "full_name": "Full Name",
+    "headline": "Headline",
+    "location_name": "Location",
+    "industry": "Industry",
+    "summary": "Summary",
+    "mutual_count": "Mutual Count",
+    "connections_count": "Connections Count",
+    "current_company": "Current Company",
+    "current_company_position": "Current Title",
+    "current_company_industry": "Industry",
+    "original_current_company": "Current Company",
+    "original_current_company_position": "Current Title",
+    "organization_1": "Organization 1",
+    "organization_title_1": "Organization 1 Title",
+    "organization_description_1": "Organization 1 Description",
+    "organization_website_1": "Organization 1 Website",
+    "organization_domain_1": "Organization 1 Domain",
+    "organization_2": "Organization 2",
+    "organization_title_2": "Organization 2 Title",
+    "organization_description_2": "Organization 2 Description",
+    "organization_website_2": "Organization 2 Website",
+    "organization_domain_2": "Organization 2 Domain",
+    "organization_3": "Organization 3",
+    "organization_title_3": "Organization 3 Title",
+    "organization_description_3": "Organization 3 Description",
+    "organization_website_3": "Organization 3 Website",
+    "organization_domain_3": "Organization 3 Domain",
+    "position_description_1": "Position 1 Description",
+    "position_description_2": "Position 2 Description",
+    "position_description_3": "Position 3 Description",
+    "education_1": "Education 1 School",
+    "education_degree_1": "Education 1 Degree",
+    "education_fos_1": "Education 1 Field of Study",
+    "education_start_1": "Education 1 Start",
+    "education_end_1": "Education 1 End",
+    "education_2": "Education 2 School",
+    "education_degree_2": "Education 2 Degree",
+    "education_fos_2": "Education 2 Field of Study",
+    "education_start_2": "Education 2 Start",
+    "education_end_2": "Education 2 End",
+    "education_3": "Education 3 School",
+    "education_degree_3": "Education 3 Degree",
+    "education_fos_3": "Education 3 Field of Study",
+    "education_start_3": "Education 3 Start",
+    "education_end_3": "Education 3 End",
+    "stage": "Stage",
+    "berkeley_signal": "Berkeley Signal",
+    "columbia_signal": "Columbia Signal",
+}
+
+
+def normalize_full_input(full: pd.DataFrame) -> pd.DataFrame:
+    frame = full.copy()
+    normalized = {}
+    for col in frame.columns:
+        target = LH_COLUMN_ALIASES.get(col.lower(), col)
+        normalized[target] = frame[col]
+    frame = pd.DataFrame(normalized)
+    for col in ["Stage", "Berkeley Signal", "Columbia Signal"]:
+        if col not in frame.columns:
+            frame[col] = ""
+    return frame
 
 
 def load_distance_map(distance_csv: str) -> pd.DataFrame:
@@ -31,6 +103,7 @@ def main():
     ap.add_argument("--full", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--distance-csv", default="data/everything.csv")
+    ap.add_argument("--company-backfill-dir", default=os.getenv("COMPANY_BACKFILL_DIR"))
     args = ap.parse_args()
 
     full_path = Path(args.full)
@@ -43,17 +116,27 @@ def main():
     ensure_dir(args.out)
     full = pd.read_csv(full_path, dtype={"Raw ID": str, "Best Email": str}, low_memory=False)
 
+    full = normalize_full_input(full)
+
     required = {
         "Raw ID", "Best Email", "Full Name", "Current Company", "Current Title", "Headline", "Industry", "Mutual Count", "Summary",
-        "Berkeley Signal", "Columbia Signal", "Stage",
         "Position 1 Description", "Position 2 Description", "Position 3 Description",
         "Organization 1", "Organization 2", "Organization 3",
         "Organization 1 Title", "Organization 2 Title", "Organization 3 Title",
         "Organization 1 Description", "Organization 2 Description", "Organization 3 Description",
+        "Organization 1 Website", "Organization 2 Website", "Organization 3 Website",
     }
     missing = [c for c in required if c not in full.columns]
     if missing:
         raise SystemExit(f"Missing required columns in full.csv: {missing}")
+
+    full, backfill_report = enrich_company_context(full, args.company_backfill_dir)
+    for col in [
+        "Organization 1 Domain", "Organization 2 Domain", "Organization 3 Domain",
+        "Company Context Source", "Company Backfill Needed", "Company Backfill Reason", "Company Context Score",
+    ]:
+        if col not in full.columns:
+            full[col] = ""
 
     full["Raw ID"] = full["Raw ID"].map(normalize_key)
     full["Best Email"] = full["Best Email"].map(normalize_email)
@@ -67,11 +150,16 @@ def main():
     keyed = full[full["Match Key"] != ""].copy()
     duplicate_input_rows = int(keyed["Match Key"].duplicated().sum())
 
-    # Vectorized dedupe for speed: prefer Stage present, then later Stage, then more recent timestamp, then richer row.
-    keyed["_stage_norm"] = keyed["Stage"].fillna("").astype(str).str.strip().str.lower().str.replace("-", " ", regex=False)
-    keyed["_stage_norm"] = keyed["_stage_norm"].replace({"ondeck": "on deck", "follow up": "followup", "replied": "responded"})
-    keyed["_has_stage"] = (keyed["_stage_norm"] != "").astype(int)
-    keyed["_stage_rank"] = keyed["_stage_norm"].map(STAGE_RANK).fillna(0).astype(int)
+    # Vectorized dedupe prefers an explicit Stage when one exists, but accepts LH-only exports without it.
+    if "Stage" in keyed.columns:
+        keyed["_stage_norm"] = keyed["Stage"].fillna("").astype(str).str.strip().str.lower().str.replace("-", " ", regex=False)
+        keyed["_stage_norm"] = keyed["_stage_norm"].replace({"ondeck": "on deck", "follow up": "followup", "replied": "responded"})
+        keyed["_has_stage"] = (keyed["_stage_norm"] != "").astype(int)
+        keyed["_stage_rank"] = keyed["_stage_norm"].map(STAGE_RANK).fillna(0).astype(int)
+    else:
+        keyed["_stage_norm"] = ""
+        keyed["_has_stage"] = 0
+        keyed["_stage_rank"] = 0
     ts_cols = [c for c in ["Last Touch Date", "Last Sent At", "Last Received At", "Connected At", "Created"] if c in keyed.columns]
     for c in ts_cols:
         keyed[c + "__ts"] = pd.to_datetime(keyed[c], errors="coerce", utc=True)
@@ -97,10 +185,7 @@ def main():
         "Industry": deduped["Industry"],
         "Mutual Count": deduped["Mutual Count"].map(normalize_mutual_count),
         "Summary": deduped["Summary"],
-        "Alumni Signal": [
-            recompute_alumni_signal(b, c)
-            for b, c in zip(deduped["Berkeley Signal"], deduped["Columbia Signal"])
-        ],
+        "Alumni Signal": [derive_alumni_signal_from_education(row) for _, row in deduped.iterrows()],
         "Position 1 Description": deduped["Position 1 Description"],
         "Position 2 Description": deduped["Position 2 Description"],
         "Position 3 Description": deduped["Position 3 Description"],
@@ -113,6 +198,16 @@ def main():
         "Organization 1 Description": deduped["Organization 1 Description"],
         "Organization 2 Description": deduped["Organization 2 Description"],
         "Organization 3 Description": deduped["Organization 3 Description"],
+        "Organization 1 Website": deduped["Organization 1 Website"],
+        "Organization 2 Website": deduped["Organization 2 Website"],
+        "Organization 3 Website": deduped["Organization 3 Website"],
+        "Organization 1 Domain": deduped.get("Organization 1 Domain", ""),
+        "Organization 2 Domain": deduped.get("Organization 2 Domain", ""),
+        "Organization 3 Domain": deduped.get("Organization 3 Domain", ""),
+        "Company Context Source": deduped.get("Company Context Source", "native"),
+        "Company Backfill Needed": deduped.get("Company Backfill Needed", "no"),
+        "Company Backfill Reason": deduped.get("Company Backfill Reason", ""),
+        "Company Context Score": deduped.get("Company Context Score", 0),
     })
 
     dist = load_distance_map(str(distance_path))
@@ -125,6 +220,41 @@ def main():
     prepared.to_csv(f"{args.out}/prepared_scoring_input.csv", index=False)
     trimmed_generated.to_csv(f"{args.out}/trimmed_generated.csv", index=False)
     deduped.to_csv(f"{args.out}/full_deduped_for_scoring.csv", index=False)
+    if not backfill_report.empty:
+        backfill_report.to_csv(f"{args.out}/company_backfill_report.csv", index=False)
+
+    company_backfill_preview = deduped[deduped.get("Company Backfill Needed", "no") == "yes"].copy()
+    if not company_backfill_preview.empty:
+        backfill_cols = [
+            c for c in [
+                "Raw ID",
+                "Best Email",
+                "Full Name",
+                "LinkedIn URL",
+                "Current Company",
+                "Current Title",
+                "Company Context Source",
+                "Company Backfill Reason",
+                "Company Context Score",
+                "Organization 1",
+                "Organization 1 Title",
+                "Organization 1 Description",
+                "Organization 1 Website",
+                "Organization 1 Domain",
+                "Organization 2",
+                "Organization 2 Title",
+                "Organization 2 Description",
+                "Organization 2 Website",
+                "Organization 2 Domain",
+                "Organization 3",
+                "Organization 3 Title",
+                "Organization 3 Description",
+                "Organization 3 Website",
+                "Organization 3 Domain",
+            ]
+            if c in company_backfill_preview.columns
+        ]
+        company_backfill_preview[backfill_cols].to_csv(f"{args.out}/company_backfill_preview.csv", index=False)
 
     pd.DataFrame([
         {"metric": "source_rows", "value": len(full)},
@@ -139,11 +269,14 @@ def main():
         {"metric": "alumni_cal", "value": int((prepared["Alumni Signal"] == "Cal").sum())},
         {"metric": "alumni_cbs", "value": int((prepared["Alumni Signal"] == "CBS").sum())},
         {"metric": "alumni_blank", "value": int((prepared["Alumni Signal"] == "").sum())},
+        {"metric": "company_backfill_needed", "value": int((prepared.get("Company Backfill Needed", "") == "yes").sum() if "Company Backfill Needed" in prepared.columns else 0)},
     ]).to_csv(f"{args.out}/prepare_report.csv", index=False)
 
     print(f"Wrote {args.out}/trimmed_generated.csv")
     print(f"Wrote {args.out}/prepared_scoring_input.csv")
     print(f"Wrote {args.out}/full_deduped_for_scoring.csv")
+    if not company_backfill_preview.empty:
+        print(f"Wrote {args.out}/company_backfill_preview.csv")
     print(f"Wrote {args.out}/prepare_report.csv")
 
 

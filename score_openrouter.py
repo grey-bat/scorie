@@ -23,19 +23,22 @@ from utils import (
     parse_json_from_content,
     to_int_score,
 )
+from composite_formula import legacy_weighted_score, load_composite_config, score_band, weighted_score
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUBRIC_TEXT = (SCRIPT_DIR / "scoring_rubric.md").read_text(encoding="utf-8")
+COMPOSITE_CONFIG = load_composite_config(SCRIPT_DIR / "scoring_rubric.md")
 SYSTEM_PROMPT = (
     "You are a scoring engine for B2B lead qualification. "
     "Read every provided field carefully. Count synonyms, translations, equivalent phrases, and near-synonyms. "
-    "Use the full record, including current role, historical roles, organization names, organization titles, organization descriptions, headline, summary, alumni signal, mutual count, and degree. "
+    "Use the current company and current role first. Company context is often the biggest qualitative driver, so weigh it heavily. "
+    "Use the full record, including the compact company context list, historical roles, organization names, organization titles, organization descriptions, headline, summary, alumni signal, mutual count, and degree. "
     "Return ONLY valid JSON. No markdown. No prose. "
     "Return a single JSON object with a top-level key named results. "
     "results must be an array of objects. "
-    "Each object must contain exactly these keys: id, fo_persona, ft_persona, allocator, access. "
+    "Each object must contain exactly these keys: id, fo_persona, ft_persona, allocator, access, company_fit. "
     "id must exactly equal the input id string. "
-    "All four scores must be integers from 0 to 5. "
+    "All five scores must be integers from 0 to 5. "
     "Do not calculate derived formulas.\n\n" + RUBRIC_TEXT
 )
 
@@ -62,6 +65,24 @@ _ALLOC_MID_KEYWORDS = ["director", "head", "vp", "vice president", "manager"]
 
 
 def compact_record(row: pd.Series) -> dict:
+    company_context = []
+    for idx in (1, 2, 3):
+        org_name = normalize_text(row.get(f"Organization {idx}", ""))
+        title = normalize_text(row.get(f"Organization {idx} Title", ""))
+        desc = normalize_text(row.get(f"Organization {idx} Description", ""))
+        website = normalize_text(row.get(f"Organization {idx} Website", ""))
+        domain = normalize_text(row.get(f"Organization {idx} Domain", ""))
+        if not any([org_name, title, desc, website, domain]):
+            continue
+        company_context.append({
+            "organization": org_name,
+            "title": title,
+            "description": desc[:700],
+            "website": website,
+            "domain": domain,
+        })
+    if company_context:
+        company_context = [company_context[-1]]
     return {
         "id": normalize_text(row["Match Key"]),
         "raw_id": normalize_text(row.get("Raw ID", "")),
@@ -75,18 +96,14 @@ def compact_record(row: pd.Series) -> dict:
         "degree": int(row.get("Degree", 3) or 3),
         "summary": normalize_text(row.get("Summary", "")),
         "alumni_signal": normalize_text(row.get("Alumni Signal", "")),
+        "company_context_source": normalize_text(row.get("Company Context Source", "native")) or "native",
+        "company_backfill_needed": normalize_text(row.get("Company Backfill Needed", "no")) or "no",
+        "company_backfill_reason": normalize_text(row.get("Company Backfill Reason", "")),
+        "company_context_score": int(float(row.get("Company Context Score", 0) or 0)),
+        "company_context": company_context,
         "position_1_description": normalize_text(row.get("Position 1 Description", "")),
         "position_2_description": normalize_text(row.get("Position 2 Description", "")),
         "position_3_description": normalize_text(row.get("Position 3 Description", "")),
-        "organization_1": normalize_text(row.get("Organization 1", "")),
-        "organization_2": normalize_text(row.get("Organization 2", "")),
-        "organization_3": normalize_text(row.get("Organization 3", "")),
-        "organization_1_title": normalize_text(row.get("Organization 1 Title", "")),
-        "organization_2_title": normalize_text(row.get("Organization 2 Title", "")),
-        "organization_3_title": normalize_text(row.get("Organization 3 Title", "")),
-        "organization_1_description": normalize_text(row.get("Organization 1 Description", "")),
-        "organization_2_description": normalize_text(row.get("Organization 2 Description", "")),
-        "organization_3_description": normalize_text(row.get("Organization 3 Description", "")),
     }
 
 
@@ -210,12 +227,17 @@ async def call_openrouter(session: aiohttp.ClientSession, model: str, records: l
                     raise RuntimeError(f"results is not a list: {str(results)[:800]}")
                 out = []
                 for item in results:
+                    required_keys = {"id", "fo_persona", "ft_persona", "allocator", "access", "company_fit"}
+                    missing = required_keys - set(item)
+                    if missing:
+                        raise RuntimeError(f"Model result missing required keys: {sorted(missing)}")
                     out.append({
                         "Match Key": normalize_text(item["id"]),
                         "fo_persona": to_int_score(item["fo_persona"]),
                         "ft_persona": to_int_score(item["ft_persona"]),
                         "allocator": to_int_score(item["allocator"]),
                         "access": to_int_score(item["access"]),
+                        "company_fit": to_int_score(item["company_fit"]),
                     })
                 return remap_batch_results(records, out)
         except (asyncio.TimeoutError, aiohttp.ClientError) as e:
@@ -230,11 +252,19 @@ async def call_openrouter(session: aiohttp.ClientSession, model: str, records: l
 def deterministic_mock(records: list[dict]) -> list[dict]:
     out = []
     for rec in records:
-        text = " ".join(str(rec.get(k, "")) for k in rec).lower()
+        text = " ".join(str(rec.get(k, "")) for k in rec if k != "company_context").lower()
+        company_context = " ".join(
+            " ".join(
+                str(part.get(k, "")) for k in ("organization", "title", "description", "website", "domain")
+            )
+            for part in rec.get("company_context", [])
+        ).lower()
+        text = f"{text} {company_context}"
         fo = 0
         ft = 0
         alloc = 1
         access = 0
+        company_fit = 0
         if any(k in text for k in _FO_GENERAL_KEYWORDS):
             fo = 3
         if any(k in text for k in _FO_SPECIFIC_KEYWORDS):
@@ -262,11 +292,33 @@ def deterministic_mock(records: list[dict]) -> list[dict]:
             access = max(access, 3)
         if mc_num >= 50:
             access = max(access, 4)
-        out.append({"Match Key": rec["id"], "fo_persona": min(5, fo), "ft_persona": min(5, ft), "allocator": min(5, alloc), "access": min(5, access)})
+        if rec.get("company_backfill_needed") == "yes":
+            company_fit = 1
+        company_keywords = [
+            "family office", "wealth", "private bank", "asset management", "investment", "capital", "fintech",
+            "payments", "bank", "treasury", "portfolio", "vc", "venture", "credit", "lending", "neobank",
+        ]
+        company_hits = sum(1 for k in company_keywords if k in text)
+        if company_hits >= 1:
+            company_fit = max(company_fit, 3)
+        if company_hits >= 3:
+            company_fit = max(company_fit, 4)
+        if any(k in text for k in ["family office", "wealth management", "private bank", "investment committee"]):
+            company_fit = 5
+        if not rec.get("current_company"):
+            company_fit = min(company_fit, 1)
+        out.append({
+            "Match Key": rec["id"],
+            "fo_persona": min(5, fo),
+            "ft_persona": min(5, ft),
+            "allocator": min(5, alloc),
+            "access": min(5, access),
+            "company_fit": min(5, company_fit),
+        })
     return out
 
 
-_SCORE_FIELDNAMES = ["Match Key", "Raw ID", "Best Email", "fo_persona", "ft_persona", "allocator", "access"]
+_SCORE_FIELDNAMES = ["Match Key", "Raw ID", "Best Email", "fo_persona", "ft_persona", "allocator", "access", "company_fit", "weighted_score", "legacy_weighted_score", "score_band"]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -349,7 +401,11 @@ async def _flush_batch(
                     "ft_persona": item["ft_persona"],
                     "allocator": item["allocator"],
                     "access": item["access"],
+                    "company_fit": item["company_fit"],
                 }
+                row["weighted_score"] = weighted_score(row, COMPOSITE_CONFIG.weights)
+                row["legacy_weighted_score"] = legacy_weighted_score(row, COMPOSITE_CONFIG.legacy_weights)
+                row["score_band"] = score_band(row["weighted_score"], COMPOSITE_CONFIG.score_bands)
                 writer.writerow(row)
                 fj.write(json.dumps(row, ensure_ascii=False) + "\n")
                 counter_ref[0] += 1
@@ -360,6 +416,7 @@ async def _flush_batch(
                     "fo_persona": item["fo_persona"],
                     "ft_persona": item["ft_persona"],
                     "allocator": item["allocator"],
+                    "company_fit": item["company_fit"],
                     "Degree": meta.get("Degree", ""),
                     "access": item["access"],
                     "Headline": meta.get("Headline", ""),

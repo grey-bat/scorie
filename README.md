@@ -2,7 +2,8 @@
 
 ## What It Is
 - LLM-based lead scoring pipeline for B2B outreach
-- Scores LinkedIn profiles across 4 dimensions and syncs results back to Notion
+- Scores LinkedIn profiles across 5 dimensions and syncs results back to Notion
+- Supports selective company-data backfill for close leads using Linked Helper exports
 
 ## Status
 - Active — production pipeline, tested against real Notion database
@@ -13,7 +14,7 @@
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env .env.local  # edit with your keys
+cp .env.example .env  # edit with your keys
 python run_pipeline.py --full data/full.csv --distance-csv data/everything.csv
 ```
 
@@ -25,6 +26,7 @@ python run_pipeline.py --full data/full.csv --distance-csv data/everything.csv
 - `update_notion.py` — write scores to Notion pages
 - `watch_progress.py` — live progress monitor
 - `sync_incremental_delta.py` — incremental sync mode
+- `run_pipeline.py` now emits `05_backfill/company_backfill_candidates.csv` for rows with `weighted_score >= 50` that still need company data
 
 ## Env Vars
 - `OPENROUTER_API_KEY` — OpenRouter API key for LLM scoring

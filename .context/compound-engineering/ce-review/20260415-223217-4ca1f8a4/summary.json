@@ -1,0 +1,59 @@
+{
+  "run_id": "20260415-223217-4ca1f8a4",
+  "scope_base": "3ffa9f4cc693803278d63801f3fe186fad0b19d6",
+  "mode": "interactive",
+  "intent": "Add an end-to-end scoring/backfill pipeline for Notion, including incremental sync, live reconciliation, catch-up mode, duplicate handling, and a compact progress watcher.",
+  "findings": [
+    {
+      "severity": "P1",
+      "file": "sync_incremental_delta.py:239",
+      "title": "Catch-up / reconcile modes read the live scores file",
+      "route": "safe_auto -> review-fixer"
+    },
+    {
+      "severity": "P2",
+      "file": "watch_progress.py:63",
+      "title": "Watcher can surface stale sync artifacts instead of the current run",
+      "route": "safe_auto -> review-fixer"
+    },
+    {
+      "severity": "P2",
+      "file": "run_pipeline.py:13",
+      "title": "Canonical entrypoint hides the new recovery modes",
+      "route": "manual -> downstream-resolver"
+    },
+    {
+      "severity": "P2",
+      "file": "update_notion.py:494",
+      "title": "Threaded writeback path lacks direct regression coverage",
+      "route": "manual -> downstream-resolver"
+    },
+    {
+      "severity": "P2",
+      "file": "prepare_input.py:68",
+      "title": "Dedupe tie-break ordering lacks coverage",
+      "route": "manual -> downstream-resolver"
+    },
+    {
+      "severity": "P3",
+      "file": "README.md:5",
+      "title": "Published README contains Proof annotation HTML",
+      "route": "safe_auto -> review-fixer"
+    }
+  ],
+  "coverage": {
+    "suppressed": [],
+    "timed_out_reviewers": [
+      "correctness",
+      "testing",
+      "maintainability",
+      "project-standards",
+      "agent-native-reviewer"
+    ],
+    "learnings": [
+      "Freshness before inference",
+      "Separate compact watcher for long Notion jobs"
+    ]
+  },
+  "verdict": "Ready with fixes"
+}

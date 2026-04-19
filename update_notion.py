@@ -314,10 +314,17 @@ def load_delta(args) -> pd.DataFrame:
     return delta
 
 
-def resolve_schema(client: NotionClient, data_source_id: str) -> tuple[Dict[str, str], Optional[str], Optional[str]]:
+def resolve_schema(client: NotionClient, data_source_id: str) -> tuple[Dict[str, str], Optional[str], Optional[str], list[str]]:
     schema = client.get(f"/data_sources/{data_source_id}")
     props = schema.get("properties", {})
-    required_targets = list(RAW_SCORE_COLUMNS.values()) + ["Degree", "Alumni Signal"]
+    required_targets = [
+        RAW_SCORE_COLUMNS["fo_persona"],
+        RAW_SCORE_COLUMNS["ft_persona"],
+        RAW_SCORE_COLUMNS["allocator"],
+        RAW_SCORE_COLUMNS["access"],
+        "Degree",
+        "Alumni Signal",
+    ]
     target_types: Dict[str, str] = {}
     for name in required_targets:
         if name not in props:
@@ -326,11 +333,16 @@ def resolve_schema(client: NotionClient, data_source_id: str) -> tuple[Dict[str,
         if ptype == "formula":
             raise SystemExit(f"Target property is formula and cannot be updated via API: {name}")
         target_types[name] = ptype
+    optional_targets: list[str] = []
+    company_fit_prop = RAW_SCORE_COLUMNS.get("company_fit")
+    if company_fit_prop and company_fit_prop in props and props[company_fit_prop]["type"] != "formula":
+        optional_targets.append(company_fit_prop)
+        target_types[company_fit_prop] = props[company_fit_prop]["type"]
     if "Raw ID" not in props and "Best Email" not in props:
         raise SystemExit("Notion data source must contain Raw ID and/or Best Email for writeback matching.")
     raw_prop_type = props["Raw ID"]["type"] if "Raw ID" in props else None
     email_prop_type = props["Best Email"]["type"] if "Best Email" in props else None
-    return target_types, raw_prop_type, email_prop_type
+    return target_types, raw_prop_type, email_prop_type, optional_targets
 
 
 def build_write_jobs(
@@ -339,6 +351,7 @@ def build_write_jobs(
     raw_prop_type: Optional[str],
     email_prop_type: Optional[str],
     required_targets: list,
+    optional_targets: list,
     target_types: Dict[str, str],
     out: str,
     dry_run: bool,
@@ -400,7 +413,8 @@ def build_write_jobs(
             publish("matching")
             continue
         page_id = page["id"]
-        payload = {"properties": {col: notion_set_payload(target_types[col], row[col]) for col in required_targets}}
+        payload_cols = required_targets + optional_targets
+        payload = {"properties": {col: notion_set_payload(target_types[col], row[col]) for col in payload_cols if col in row.index}}
         if page_matches_payload(page, payload, target_types):
             counters["noop"] += 1
             logs.append({"Match Key": mk, "status": "noop", "page_id": page_id})
@@ -515,8 +529,15 @@ def main():
 
     client = NotionClient(api_key)
     data_source_id = resolve_data_source_id(client, args.data_source_id, args.database_id)
-    target_types, raw_prop_type, email_prop_type = resolve_schema(client, data_source_id)
-    required_targets = list(RAW_SCORE_COLUMNS.values()) + ["Degree", "Alumni Signal"]
+    target_types, raw_prop_type, email_prop_type, optional_targets = resolve_schema(client, data_source_id)
+    required_targets = [
+        RAW_SCORE_COLUMNS["fo_persona"],
+        RAW_SCORE_COLUMNS["ft_persona"],
+        RAW_SCORE_COLUMNS["allocator"],
+        RAW_SCORE_COLUMNS["access"],
+        "Degree",
+        "Alumni Signal",
+    ]
 
     delta = load_delta(args)
     total_rows = len(delta)
@@ -572,7 +593,7 @@ def main():
         raw_cache, email_cache = build_match_caches(all_pages, raw_prop_type is not None, email_prop_type is not None)
         write_jobs, logs, job_counters, raw_duplicate_rows, email_duplicate_rows = build_write_jobs(
             delta, all_pages, raw_prop_type, email_prop_type,
-            required_targets, target_types, args.out, args.dry_run, publish,
+            required_targets, optional_targets, target_types, args.out, args.dry_run, publish,
         )
         counters.update(job_counters)
         if write_jobs:

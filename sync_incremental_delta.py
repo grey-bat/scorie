@@ -61,7 +61,14 @@ def run(cmd):
 
 def target_types_for_writeback(schema: dict) -> dict[str, str]:
     props = schema.get("properties", {})
-    required_targets = list(RAW_SCORE_COLUMNS.values()) + ["Degree", "Alumni Signal"]
+    required_targets = [
+        RAW_SCORE_COLUMNS["fo_persona"],
+        RAW_SCORE_COLUMNS["ft_persona"],
+        RAW_SCORE_COLUMNS["allocator"],
+        RAW_SCORE_COLUMNS["access"],
+        "Degree",
+        "Alumni Signal",
+    ]
     target_types = {}
     for name in required_targets:
         if name not in props:
@@ -70,12 +77,17 @@ def target_types_for_writeback(schema: dict) -> dict[str, str]:
         if ptype == "formula":
             raise SystemExit(f"Target property is formula and cannot be updated via API: {name}")
         target_types[name] = ptype
+    company_fit_prop = RAW_SCORE_COLUMNS.get("company_fit")
+    if company_fit_prop and company_fit_prop in props and props[company_fit_prop]["type"] != "formula":
+        target_types[company_fit_prop] = props[company_fit_prop]["type"]
     return target_types
 
 
 def build_payload_for_row(row: pd.Series, target_types: dict[str, str]) -> dict:
     payload = {"properties": {}}
     for name in list(RAW_SCORE_COLUMNS.values()) + ["Degree", "Alumni Signal"]:
+        if name not in target_types:
+            continue
         payload["properties"][name] = notion_set_payload(target_types[name], row[name])
     return payload
 

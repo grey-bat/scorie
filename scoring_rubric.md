@@ -2,12 +2,13 @@
 
 ## Output
 
-Return four raw scores only:
+Return five raw scores only:
 
 1. `fo_persona`
 2. `ft_persona`
 3. `allocator`
 4. `access`
+5. `company_fit`
 
 All scores must be integers from 0 to 5.
 Do not calculate composite formulas.
@@ -25,6 +26,8 @@ Do not calculate composite formulas.
 * A person can score high on Persona and low on Allocator.
 
 * A person can score high on Access and low on Persona.
+
+* Company fit is a first-class signal and should heavily reflect the current company, current title, and company-level context.
 
 * A trusted service provider to family offices or UHNW clients can score high on Family Office Persona even if they are not the direct capital allocator.
 
@@ -313,6 +316,60 @@ Essentially unreachable from available evidence.
 * `Degree = 3` is only a mild negative unless other reachability evidence is also weak.
 
 * Do not let degree define the band.
+
+## PROPERTY 5: Company Fit Score
+
+This measures how strong the current company context is for this use case.
+Use the current company and current title first, then company industry, organization descriptions, domains, websites, and the broader organization history.
+
+### 5
+
+Clear strategic fit at the current company level. The company itself is highly relevant, and the current role materially strengthens that fit.
+
+### 4
+
+Strong company relevance, even if the role is not perfect.
+
+### 3
+
+Useful but not exceptional company fit. There is a real signal, but the company is not a top-tier match.
+
+### 2
+
+Weak company relevance. The lead may still be worth a custom message, but company fit is not compelling.
+
+### 1
+
+Very remote company fit.
+
+### 0
+
+No credible company fit signal.
+
+### Company fit rules
+
+* Company level context can outweigh the lead biography when the company is the real buying or adoption locus.
+
+* Rich company descriptions and domains matter.
+
+* If the company is generic, ambiguous, or missing, do not inflate the score based on the person alone.
+
+* If current company context is thin, prefer low company_fit even if the biography is attractive.
+
+## Weights
+
+* fo_persona = 0.18
+* ft_persona = 0.12
+* allocator = 0.15
+* access = 0.15
+* company_fit = 0.40
+
+## Score Bands
+
+* qualified = 75-100
+* nearly_qualified = 50-74
+* little_qualified = 25-49
+* totally_unqualified = 0-24
 
 ## Calibration examples
 
