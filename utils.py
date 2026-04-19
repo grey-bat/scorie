@@ -276,61 +276,52 @@ def utc_stamp() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
+def _extract_formula(prop: Dict[str, Any]) -> str:
+    f = prop.get("formula", {})
+    ftype = f.get("type")
+    if ftype == "string":
+        return f.get("string") or ""
+    if ftype == "number":
+        n = f.get("number")
+        return "" if n is None else str(n)
+    if ftype == "boolean":
+        return "true" if f.get("boolean") else "false"
+    if ftype == "date":
+        d = f.get("date")
+        return "" if not d else (d.get("start") or "")
+    return ""
+
+
+def _extract_unique_id(prop: Dict[str, Any]) -> str:
+    uid = prop.get("unique_id")
+    return "" if not uid else f"{uid.get('prefix', '')}{uid.get('number', '')}"
+
+
+_NOTION_PLAIN_TEXT_EXTRACTORS: Dict[str, Any] = {
+    "title":           lambda p: "".join(t.get("plain_text", "") for t in p.get("title", [])),
+    "rich_text":       lambda p: "".join(t.get("plain_text", "") for t in p.get("rich_text", [])),
+    "number":          lambda p: "" if p.get("number") is None else str(p["number"]),
+    "select":          lambda p: "" if not p.get("select") else p["select"].get("name", ""),
+    "multi_select":    lambda p: ", ".join(x.get("name", "") for x in p.get("multi_select", [])),
+    "status":          lambda p: "" if not p.get("status") else p["status"].get("name", ""),
+    "url":             lambda p: p.get("url") or "",
+    "email":           lambda p: p.get("email") or "",
+    "phone_number":    lambda p: p.get("phone_number") or "",
+    "date":            lambda p: "" if not p.get("date") else (p["date"].get("start") or ""),
+    "checkbox":        lambda p: "true" if p.get("checkbox") else "false",
+    "created_time":    lambda p: p.get("created_time") or "",
+    "last_edited_time": lambda p: p.get("last_edited_time") or "",
+    "people":          lambda p: ", ".join(x.get("name", "") or x.get("id", "") for x in p.get("people", [])),
+    "formula":         _extract_formula,
+    "unique_id":       _extract_unique_id,
+}
+
+
 def notion_plain_text(prop: Dict[str, Any]) -> str:
     if not isinstance(prop, dict):
         return ""
-    ptype = prop.get("type")
-    if ptype == "title":
-        return "".join([t.get("plain_text", "") for t in prop.get("title", [])])
-    if ptype == "rich_text":
-        return "".join([t.get("plain_text", "") for t in prop.get("rich_text", [])])
-    if ptype == "number":
-        n = prop.get("number")
-        return "" if n is None else str(n)
-    if ptype == "select":
-        obj = prop.get("select")
-        return "" if not obj else obj.get("name", "")
-    if ptype == "multi_select":
-        return ", ".join([x.get("name", "") for x in prop.get("multi_select", [])])
-    if ptype == "status":
-        obj = prop.get("status")
-        return "" if not obj else obj.get("name", "")
-    if ptype == "url":
-        return prop.get("url") or ""
-    if ptype == "email":
-        return prop.get("email") or ""
-    if ptype == "phone_number":
-        return prop.get("phone_number") or ""
-    if ptype == "date":
-        obj = prop.get("date")
-        return "" if not obj else (obj.get("start") or "")
-    if ptype == "checkbox":
-        return "true" if prop.get("checkbox") else "false"
-    if ptype == "created_time":
-        return prop.get("created_time") or ""
-    if ptype == "last_edited_time":
-        return prop.get("last_edited_time") or ""
-    if ptype == "people":
-        return ", ".join([x.get("name", "") or x.get("id", "") for x in prop.get("people", [])])
-    if ptype == "formula":
-        f = prop.get("formula", {})
-        ftype = f.get("type")
-        if ftype == "string":
-            return f.get("string") or ""
-        if ftype == "number":
-            n = f.get("number")
-            return "" if n is None else str(n)
-        if ftype == "boolean":
-            return "true" if f.get("boolean") else "false"
-        if ftype == "date":
-            d = f.get("date")
-            return "" if not d else (d.get("start") or "")
-    if ptype == "unique_id":
-        uid = prop.get("unique_id")
-        if not uid:
-            return ""
-        return f"{uid.get('prefix','')}{uid.get('number','')}"
-    return ""
+    extractor = _NOTION_PLAIN_TEXT_EXTRACTORS.get(prop.get("type"))
+    return extractor(prop) if extractor else ""
 
 
 def notion_set_payload(prop_type: str, value: Any) -> Dict[str, Any]:

@@ -50,6 +50,16 @@ SPEED_PRESETS = {
     "aggressive": {"batch_size": 5, "concurrency": 6},
 }
 
+_FO_GENERAL_KEYWORDS = ["family office", "private office", "wealth", "investment", "capital", "gestora", "asset"]
+_FO_SPECIFIC_KEYWORDS = ["family office", "private office"]
+_FO_SENIOR_KEYWORDS = ["partner", "principal", "cio", "portfolio manager", "investor", "investment committee"]
+_FO_TOP_KEYWORDS = ["founder", "partner", "principal", "cio", "investor", "investing"]
+_FT_GENERAL_KEYWORDS = ["fintech", "payments", "neobank", "embedded finance", "wallet", "stablecoin", "blockchain", "web3", "digital bank"]
+_FT_SENIOR_KEYWORDS = ["head of digital", "innovation", "treasury", "banking infrastructure", "partnerships", "product"]
+_ALLOC_TOP_KEYWORDS = ["partner", "principal", "cio", "cfo", "founder", "president", "managing director", "chief investment officer"]
+_ALLOC_DECISION_KEYWORDS = ["investment committee", "portfolio allocation", "capital allocation", "budget owner"]
+_ALLOC_MID_KEYWORDS = ["director", "head", "vp", "vice president", "manager"]
+
 
 def compact_record(row: pd.Series) -> dict:
     return {
@@ -225,23 +235,23 @@ def deterministic_mock(records: list[dict]) -> list[dict]:
         ft = 0
         alloc = 1
         access = 0
-        if any(k in text for k in ["family office", "private office", "wealth", "investment", "capital", "gestora", "asset"]):
+        if any(k in text for k in _FO_GENERAL_KEYWORDS):
             fo = 3
-        if "family office" in text or "private office" in text:
+        if any(k in text for k in _FO_SPECIFIC_KEYWORDS):
             fo = 4
-        if any(k in text for k in ["partner", "principal", "cio", "portfolio manager", "investor", "investment committee"]):
+        if any(k in text for k in _FO_SENIOR_KEYWORDS):
             fo = max(fo, 4)
-        if ("family office" in text or "private office" in text) and any(k in text for k in ["founder", "partner", "principal", "cio", "investor", "investing"]):
+        if any(k in text for k in _FO_SPECIFIC_KEYWORDS) and any(k in text for k in _FO_TOP_KEYWORDS):
             fo = 5
-        if any(k in text for k in ["fintech", "payments", "neobank", "embedded finance", "wallet", "stablecoin", "blockchain", "web3", "digital bank"]):
+        if any(k in text for k in _FT_GENERAL_KEYWORDS):
             ft = 3
-        if any(k in text for k in ["head of digital", "innovation", "treasury", "banking infrastructure", "partnerships", "product"]):
+        if any(k in text for k in _FT_SENIOR_KEYWORDS):
             ft = max(ft, 4)
-        if any(k in text for k in ["partner", "principal", "cio", "cfo", "founder", "president", "managing director", "chief investment officer"]):
+        if any(k in text for k in _ALLOC_TOP_KEYWORDS):
             alloc = 4
-        if any(k in text for k in ["investment committee", "portfolio allocation", "capital allocation", "budget owner"]):
+        if any(k in text for k in _ALLOC_DECISION_KEYWORDS):
             alloc = 5
-        elif any(k in text for k in ["director", "head", "vp", "vice president", "manager"]):
+        elif any(k in text for k in _ALLOC_MID_KEYWORDS):
             alloc = max(alloc, 3)
         alumni = rec.get("alumni_signal", "")
         mc_num = int(rec.get("mutual_count", 0) or 0)

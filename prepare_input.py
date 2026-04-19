@@ -5,6 +5,8 @@ import pandas as pd
 from utils import (
     PREPARED_OUTPUT_COLUMNS,
     MODEL_CONTEXT_COLUMNS,
+    STAGE_RANK,
+    RICHNESS_FIELDS,
     ensure_dir,
     map_distance_label,
     normalize_key,
@@ -66,11 +68,10 @@ def main():
     duplicate_input_rows = int(keyed["Match Key"].duplicated().sum())
 
     # Vectorized dedupe for speed: prefer Stage present, then later Stage, then more recent timestamp, then richer row.
-    stage_map = {"new": 1, "on deck": 2, "qualified": 3, "outreached": 4, "responded": 5, "booked": 6, "met": 7, "followup": 8}
     keyed["_stage_norm"] = keyed["Stage"].fillna("").astype(str).str.strip().str.lower().str.replace("-", " ", regex=False)
     keyed["_stage_norm"] = keyed["_stage_norm"].replace({"ondeck": "on deck", "follow up": "followup", "replied": "responded"})
     keyed["_has_stage"] = (keyed["_stage_norm"] != "").astype(int)
-    keyed["_stage_rank"] = keyed["_stage_norm"].map(stage_map).fillna(0).astype(int)
+    keyed["_stage_rank"] = keyed["_stage_norm"].map(STAGE_RANK).fillna(0).astype(int)
     ts_cols = [c for c in ["Last Touch Date", "Last Sent At", "Last Received At", "Connected At", "Created"] if c in keyed.columns]
     for c in ts_cols:
         keyed[c + "__ts"] = pd.to_datetime(keyed[c], errors="coerce", utc=True)
@@ -79,16 +80,8 @@ def main():
         keyed["_best_ts"] = ts_frame.max(axis=1)
     else:
         keyed["_best_ts"] = pd.Timestamp("1970-01-01", tz="UTC")
-    richness_fields = [
-        "Current Company", "Current Title", "Headline", "Summary", "Industry", "Stage",
-        "Position 1 Description", "Position 2 Description", "Position 3 Description",
-        "Organization 1", "Organization 2", "Organization 3",
-        "Organization 1 Title", "Organization 2 Title", "Organization 3 Title",
-        "Organization 1 Description", "Organization 2 Description", "Organization 3 Description",
-        "Mutual Count", "Berkeley Signal", "Columbia Signal",
-    ]
-    richness_fields = [c for c in richness_fields if c in keyed.columns]
-    keyed["_richness"] = keyed[richness_fields].notna().sum(axis=1)
+    _richness_cols = [c for c in RICHNESS_FIELDS if c in keyed.columns]
+    keyed["_richness"] = keyed[_richness_cols].notna().sum(axis=1)
     keyed = keyed.sort_values(["Match Key", "_has_stage", "_stage_rank", "_best_ts", "_richness"], ascending=[True, False, False, False, False], kind="stable")
     deduped = keyed.drop_duplicates(subset=["Match Key"], keep="first").copy()
     deduped = deduped.sort_values(["_source_order"], kind="stable").copy()

@@ -39,6 +39,7 @@ def make_full_row(match_key, raw_id, best_email, company, title, headline, stage
         "Organization 2 Description": "",
         "Organization 3 Description": "",
         "Distance": 3,
+        "Degree": 0,
         "Match Key": match_key,
     }
 
@@ -113,8 +114,8 @@ class SyncIncrementalDeltaTests(unittest.TestCase):
             make_full_row("raw:def", "def", "", "Other Co", "Title", "Headline", alumni_signal=""),
         ])
         prepared = pd.DataFrame([
-            make_prepared_row("raw:abc", "abc", "", 3, "Cal"),
-            make_prepared_row("raw:def", "def", "", 3, ""),
+            make_prepared_row("raw:abc", "abc", "", 0, "Cal"),
+            make_prepared_row("raw:def", "def", "", 0, ""),
         ])
         scores = pd.DataFrame([
             make_scores_row("raw:abc", "abc", ""),

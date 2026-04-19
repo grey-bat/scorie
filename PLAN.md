@@ -31,13 +31,13 @@
   - Deduplication logic (lines 69–93) should be `deduplicate_by_match_key(keyed: pd.DataFrame) -> pd.DataFrame`
   - Already partially extracted in `utils.py` (`STAGE_RANK`, `RICHNESS_FIELDS`) but the vectorized logic in `prepare_input.py` duplicates constants already in `utils.py`
 
-- [ ] **`prepare_input.py` lines 69–73 — duplicates `utils.py` constants**
+- [x] **`prepare_input.py` lines 69–73 — duplicates `utils.py` constants**
   - `stage_map` dict and `richness_fields` list are re-defined inline; `utils.py` already has `STAGE_RANK` and `RICHNESS_FIELDS` — use those directly
 
-- [ ] **`score_openrouter.py` `deterministic_mock()` — 35-line function with nested `if/any()` chains and magic strings (CODE.md: no magic strings, max ~50 lines)**
+- [x] **`score_openrouter.py` `deterministic_mock()` — 35-line function with nested `if/any()` chains and magic strings (CODE.md: no magic strings, max ~50 lines)**
   - Keyword lists (`family office`, `fintech`, etc.) should be named constants at module level, not inline anonymous lists
 
-- [ ] **`utils.py` `notion_plain_text()` — 54-line if/elif chain (CODE.md: max ~50 lines)**
+- [x] **`utils.py` `notion_plain_text()` — 54-line if/elif chain (CODE.md: max ~50 lines)**
   - Extract to a `_NOTION_PLAIN_TEXT_EXTRACTORS` dispatch dict mapping `ptype → callable`
 
 ### 🟢 Usability / Ops (PLAN items)
