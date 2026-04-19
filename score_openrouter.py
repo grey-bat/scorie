@@ -266,8 +266,10 @@ def deterministic_mock(records: list[dict]) -> list[dict]:
     return out
 
 
-async def main():
-    load_dotenv()
+_SCORE_FIELDNAMES = ["Match Key", "Raw ID", "Best Email", "fo_persona", "ft_persona", "allocator", "access"]
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True)
     ap.add_argument("--out", required=True)
@@ -287,67 +289,149 @@ async def main():
     ap.add_argument("--timeout-sock-read", type=int, default=int(os.getenv("OPENROUTER_TIMEOUT_SOCK_READ", "120")))
     ap.add_argument("--sync-notion", action="store_true")
     ap.add_argument("--sync-notion-every-waves", type=int, default=1)
-    args = ap.parse_args()
+    return ap
 
-    if args.speed:
-        preset = SPEED_PRESETS[args.speed]
-        args.batch_size = preset["batch_size"]
-        args.concurrency = preset["concurrency"]
 
+def load_todo(args) -> tuple[pd.DataFrame, set, Path, Path, Path]:
     ensure_dir(args.out)
     df = pd.read_csv(args.input, dtype={"Match Key": str, "Raw ID": str, "Best Email": str}, low_memory=False)
     df = df.iloc[max(0, args.start_row - 1):].copy()
     if args.max_records:
         df = df.iloc[: args.max_records]
-
     results_csv = Path(args.out) / "scores_raw.csv"
     progress_jsonl = Path(args.out) / "scores_progress.jsonl"
     failed_jsonl = Path(args.out) / "failed_batches.jsonl"
-    done_ids = set()
+    done_ids: set = set()
     if results_csv.exists():
         prev = pd.read_csv(results_csv, dtype={"Match Key": str})
         if "Match Key" in prev.columns:
             done_ids = set(prev["Match Key"].map(normalize_text).tolist())
-
     todo = df[~df["Match Key"].map(normalize_text).isin(done_ids)].copy()
-    if todo.empty:
-        print("Nothing to do.")
-        return
+    return todo, done_ids, results_csv, progress_jsonl, failed_jsonl
 
-    print(f"!!! STARTING NEW SESSION AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} !!!")
-    print(
-        "Run config: "
-        f"speed={args.speed or 'custom'} | "
-        f"batch_size={args.batch_size} | "
-        f"concurrency={args.concurrency} | "
-        f"sync_notion={bool(args.sync_notion)} | "
-        f"sync_every_waves={args.sync_notion_every_waves} | "
-        f"batch_retries={args.batch_retries} | "
-        f"recovery_delay={args.recovery_delay}s | "
-        f"timeout_total={args.timeout_total}s | "
-        f"timeout_sock_read={args.timeout_sock_read}s | "
-        f"timeout_connect={args.timeout_connect}s | "
-        f"remaining_records={len(todo)} | "
-        f"already_done={len(done_ids)}",
-        flush=True,
+
+def open_api_session(args) -> "aiohttp.ClientSession | None":
+    if args.mock:
+        return None
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is required unless --mock is used.")
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    timeout = aiohttp.ClientTimeout(
+        total=args.timeout_total,
+        connect=args.timeout_connect,
+        sock_connect=args.timeout_sock_connect,
+        sock_read=args.timeout_sock_read,
     )
-    print(make_header_lines(), flush=True)
+    return aiohttp.ClientSession(headers=headers, timeout=timeout)
 
-    if not results_csv.exists():
-        with open(results_csv, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["Match Key", "Raw ID", "Best Email", "fo_persona", "ft_persona", "allocator", "access"])
-            writer.writeheader()
 
-    ordered_rows = list(todo.iterrows())
-    meta_by_index = {seq: row for seq, (_idx, row) in enumerate(ordered_rows)}
-    records = []
-    for seq, (_idx, row) in enumerate(ordered_rows):
-        rec = compact_record(row)
-        rec["_seq"] = seq
-        records.append(rec)
-    counter = len(done_ids)
+async def _flush_batch(
+    batch_out: list,
+    *,
+    meta_by_index: dict,
+    results_csv: Path,
+    progress_jsonl: Path,
+    io_lock: asyncio.Lock,
+    counter_ref: list,
+) -> None:
+    async with io_lock:
+        with open(results_csv, "a", newline="", encoding="utf-8") as fcsv, \
+                open(progress_jsonl, "a", encoding="utf-8") as fj:
+            writer = csv.DictWriter(fcsv, fieldnames=_SCORE_FIELDNAMES)
+            for item in batch_out:
+                meta = meta_by_index[item["_seq"]]
+                row = {
+                    "Match Key": item["Match Key"],
+                    "Raw ID": normalize_text(meta.get("Raw ID", "")),
+                    "Best Email": normalize_text(meta.get("Best Email", "")),
+                    "fo_persona": item["fo_persona"],
+                    "ft_persona": item["ft_persona"],
+                    "allocator": item["allocator"],
+                    "access": item["access"],
+                }
+                writer.writerow(row)
+                fj.write(json.dumps(row, ensure_ascii=False) + "\n")
+                counter_ref[0] += 1
+                print(make_row_line({
+                    "done": counter_ref[0],
+                    "Full Name": meta.get("Full Name", ""),
+                    "Current Company": meta.get("Current Company", ""),
+                    "fo_persona": item["fo_persona"],
+                    "ft_persona": item["ft_persona"],
+                    "allocator": item["allocator"],
+                    "Degree": meta.get("Degree", ""),
+                    "access": item["access"],
+                    "Headline": meta.get("Headline", ""),
+                    "Summary": meta.get("Summary", ""),
+                }), flush=True)
+
+
+async def _process_batch(
+    batch: list,
+    *,
+    args,
+    session: "aiohttp.ClientSession | None",
+    batch_retry_count: int,
+    meta_by_index: dict,
+    results_csv: Path,
+    progress_jsonl: Path,
+    io_lock: asyncio.Lock,
+    counter_ref: list,
+) -> None:
+    for attempt in range(batch_retry_count + 1):
+        try:
+            if args.mock:
+                batch_out = deterministic_mock(batch)
+            else:
+                batch_out = await call_openrouter(session, args.model, batch)
+            for item, rec in zip(batch_out, batch):
+                item["_seq"] = rec["_seq"]
+            await _flush_batch(
+                batch_out,
+                meta_by_index=meta_by_index,
+                results_csv=results_csv,
+                progress_jsonl=progress_jsonl,
+                io_lock=io_lock,
+                counter_ref=counter_ref,
+            )
+            return
+        except Exception as e:
+            if attempt < batch_retry_count:
+                print(
+                    "Retrying batch before backoff: "
+                    f"attempt={attempt + 1}/{batch_retry_count} | "
+                    f"first_match_key={batch[0]['id']} | "
+                    f"error={repr(e)}",
+                    flush=True,
+                )
+                await asyncio.sleep(min(2 ** attempt, 8) + random.random())
+                continue
+            raise
+
+
+def _spawn_sync_notion(args) -> "asyncio.Task | None":
+    if not args.sync_notion or args.mock:
+        return None
+    sync_workdir = Path(args.out).parent
+    cmd = [sys.executable, str(SCRIPT_DIR / "sync_incremental_delta.py"), "--workdir", str(sync_workdir)]
+    print(f"Partial Notion sync: workdir={sync_workdir}", flush=True)
+    return asyncio.create_task(asyncio.to_thread(subprocess.run, cmd, check=True))
+
+
+async def run_scoring_session(
+    records: list,
+    meta_by_index: dict,
+    *,
+    args,
+    session: "aiohttp.ClientSession | None",
+    results_csv: Path,
+    progress_jsonl: Path,
+    failed_jsonl: Path,
+    counter_ref: list,
+) -> None:
     io_lock = asyncio.Lock()
-    failure_counts = {}
+    failure_counts: dict = {}
     wave_count = 0
     current_batch_size = max(1, args.batch_size)
     current_concurrency = max(1, args.concurrency)
@@ -355,91 +439,23 @@ async def main():
     initial_concurrency = current_concurrency
     last_adjustment_at = None
     batch_retry_count = max(0, args.batch_retries)
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    session = None
-    if not args.mock:
-        if not api_key:
-            raise RuntimeError("OPENROUTER_API_KEY is required unless --mock is used.")
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-        timeout = aiohttp.ClientTimeout(
-            total=args.timeout_total,
-            connect=args.timeout_connect,
-            sock_connect=args.timeout_sock_connect,
-            sock_read=args.timeout_sock_read,
-        )
-        session = aiohttp.ClientSession(headers=headers, timeout=timeout)
-
-    async def flush_batch(batch_out):
-        nonlocal counter
-        async with io_lock:
-            with open(results_csv, "a", newline="", encoding="utf-8") as fcsv, open(progress_jsonl, "a", encoding="utf-8") as fj:
-                writer = csv.DictWriter(fcsv, fieldnames=["Match Key", "Raw ID", "Best Email", "fo_persona", "ft_persona", "allocator", "access"])
-                for item in batch_out:
-                    meta = meta_by_index[item["_seq"]]
-                    row = {
-                        "Match Key": item["Match Key"],
-                        "Raw ID": normalize_text(meta.get("Raw ID", "")),
-                        "Best Email": normalize_text(meta.get("Best Email", "")),
-                        "fo_persona": item["fo_persona"],
-                        "ft_persona": item["ft_persona"],
-                        "allocator": item["allocator"],
-                        "access": item["access"],
-                    }
-                    writer.writerow(row)
-                    fj.write(json.dumps(row, ensure_ascii=False) + "\n")
-                    counter += 1
-                    print(make_row_line({
-                        "done": counter,
-                        "Full Name": meta.get("Full Name", ""),
-                        "Current Company": meta.get("Current Company", ""),
-                        "fo_persona": item["fo_persona"],
-                        "ft_persona": item["ft_persona"],
-                        "allocator": item["allocator"],
-                        "Degree": meta.get("Degree", ""),
-                        "access": item["access"],
-                        "Headline": meta.get("Headline", ""),
-                        "Summary": meta.get("Summary", ""),
-                    }), flush=True)
-
-    def spawn_sync_incremental_notion():
-        if not args.sync_notion or args.mock:
-            return None
-        sync_workdir = Path(args.out).parent
-        cmd = [
-            sys.executable,
-            str(SCRIPT_DIR / "sync_incremental_delta.py"),
-            "--workdir",
-            str(sync_workdir),
-        ]
-        print(f"Partial Notion sync: workdir={sync_workdir}", flush=True)
-        return asyncio.create_task(asyncio.to_thread(subprocess.run, cmd, check=True))
-
-    async def process_batch(batch):
-        for attempt in range(batch_retry_count + 1):
-            try:
-                if args.mock:
-                    batch_out = deterministic_mock(batch)
-                else:
-                    batch_out = await call_openrouter(session, args.model, batch)
-                for item, rec in zip(batch_out, batch):
-                    item["_seq"] = rec["_seq"]
-                await flush_batch(batch_out)
-                return
-            except Exception as e:
-                if attempt < batch_retry_count:
-                    print(
-                        "Retrying batch before backoff: "
-                        f"attempt={attempt + 1}/{batch_retry_count} | "
-                        f"first_match_key={batch[0]['id']} | "
-                        f"error={repr(e)}",
-                        flush=True,
-                    )
-                    await asyncio.sleep(min(2 ** attempt, 8) + random.random())
-                    continue
-                raise
-
     pending = records[:]
     sync_task = None
+
+    flush_kwargs = dict(
+        meta_by_index=meta_by_index,
+        results_csv=results_csv,
+        progress_jsonl=progress_jsonl,
+        io_lock=io_lock,
+        counter_ref=counter_ref,
+    )
+    process_kwargs = dict(
+        args=args,
+        session=session,
+        batch_retry_count=batch_retry_count,
+        **flush_kwargs,
+    )
+
     try:
         while pending:
             active = []
@@ -449,7 +465,10 @@ async def main():
                 batch = pending[:current_batch_size]
                 pending = pending[current_batch_size:]
                 active.append(batch)
-            results = await asyncio.gather(*(process_batch(batch) for batch in active), return_exceptions=True)
+            results = await asyncio.gather(
+                *(_process_batch(batch, **process_kwargs) for batch in active),
+                return_exceptions=True,
+            )
             wave_count += 1
             failures = [(batch, res) for batch, res in zip(active, results) if isinstance(res, Exception)]
             if failures:
@@ -492,12 +511,9 @@ async def main():
                     pending = batch + pending
             else:
                 new_c, new_b, recovered = maybe_recover_capacity(
-                    current_concurrency,
-                    current_batch_size,
-                    initial_concurrency,
-                    initial_batch_size,
-                    last_adjustment_at,
-                    args.recovery_delay,
+                    current_concurrency, current_batch_size,
+                    initial_concurrency, initial_batch_size,
+                    last_adjustment_at, args.recovery_delay,
                 )
                 if recovered and (new_c != current_concurrency or new_b != current_batch_size):
                     print(
@@ -516,7 +532,7 @@ async def main():
                             sync_task.result()
                         except Exception as e:
                             print(f"Partial Notion sync failed: {e!r}", flush=True)
-                    sync_task = spawn_sync_incremental_notion()
+                    sync_task = _spawn_sync_notion(args)
                 else:
                     print("Partial Notion sync already in flight; skipping this wave.", flush=True)
     finally:
@@ -527,6 +543,56 @@ async def main():
                 await sync_task
             except Exception as e:
                 print(f"Final Partial Notion sync failed: {e!r}", flush=True)
+
+
+async def main():
+    load_dotenv()
+    args = build_arg_parser().parse_args()
+    if args.speed:
+        preset = SPEED_PRESETS[args.speed]
+        args.batch_size = preset["batch_size"]
+        args.concurrency = preset["concurrency"]
+
+    todo, done_ids, results_csv, progress_jsonl, failed_jsonl = load_todo(args)
+    if todo.empty:
+        print("Nothing to do.")
+        return
+
+    print(f"!!! STARTING NEW SESSION AT {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} !!!")
+    print(
+        "Run config: "
+        f"speed={args.speed or 'custom'} | batch_size={args.batch_size} | "
+        f"concurrency={args.concurrency} | sync_notion={bool(args.sync_notion)} | "
+        f"sync_every_waves={args.sync_notion_every_waves} | batch_retries={args.batch_retries} | "
+        f"recovery_delay={args.recovery_delay}s | timeout_total={args.timeout_total}s | "
+        f"timeout_sock_read={args.timeout_sock_read}s | timeout_connect={args.timeout_connect}s | "
+        f"remaining_records={len(todo)} | already_done={len(done_ids)}",
+        flush=True,
+    )
+    print(make_header_lines(), flush=True)
+
+    if not results_csv.exists():
+        with open(results_csv, "w", newline="", encoding="utf-8") as f:
+            csv.DictWriter(f, fieldnames=_SCORE_FIELDNAMES).writeheader()
+
+    ordered_rows = list(todo.iterrows())
+    meta_by_index = {seq: row for seq, (_idx, row) in enumerate(ordered_rows)}
+    records = []
+    for seq, (_idx, row) in enumerate(ordered_rows):
+        rec = compact_record(row)
+        rec["_seq"] = seq
+        records.append(rec)
+
+    session = open_api_session(args)
+    await run_scoring_session(
+        records, meta_by_index,
+        args=args,
+        session=session,
+        results_csv=results_csv,
+        progress_jsonl=progress_jsonl,
+        failed_jsonl=failed_jsonl,
+        counter_ref=[len(done_ids)],
+    )
 
 
 if __name__ == "__main__":

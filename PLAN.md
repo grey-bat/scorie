@@ -20,14 +20,14 @@
 
 ### 🟡 Code Quality (CODE.md violations)
 
-- [ ] **`score_openrouter.py` — `main()` is 260+ lines (CODE.md: max ~50 lines per function)**
+- [x] **`score_openrouter.py` — `main()` is 260+ lines (CODE.md: max ~50 lines per function)**
   - The async orchestration loop (lines 331–519) should be extracted into `run_scoring_session(records, args, session)` — separate concerns: setup, wave loop, flush, recovery
   - `flush_batch` and `process_batch` are nested inside `main()` — extract to module-level functions with explicit parameters instead of closures over `nonlocal`
 
-- [ ] **`update_notion.py` — `main()` is 280+ lines (CODE.md: max ~50 lines)**
+- [x] **`update_notion.py` — `main()` is 280+ lines (CODE.md: max ~50 lines)**
   - Extract: `load_delta()`, `build_write_jobs(delta, all_pages, ...)`, `execute_write_jobs(write_jobs, client, ...)` — each is a clear stage with explicit inputs/outputs
 
-- [ ] **`prepare_input.py` — `main()` is 130 lines (CODE.md: max ~50 lines)**
+- [x] **`prepare_input.py` — `main()` is 130 lines (CODE.md: max ~50 lines)**
   - Deduplication logic (lines 69–93) should be `deduplicate_by_match_key(keyed: pd.DataFrame) -> pd.DataFrame`
   - Already partially extracted in `utils.py` (`STAGE_RANK`, `RICHNESS_FIELDS`) but the vectorized logic in `prepare_input.py` duplicates constants already in `utils.py`
 
