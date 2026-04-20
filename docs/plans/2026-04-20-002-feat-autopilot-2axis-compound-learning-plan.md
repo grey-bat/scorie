@@ -118,6 +118,11 @@ python autopilot_calibrate.py \
 
 Relaunching against the same workdir is safe: baseline scoring is cached and the loop resumes from the best prior iteration.
 
+For downstream production reruns, do not assume the checked-in
+`scoring_rubric_2axis.md` is still the right scoring input. Use the promoted
+artifact under `out/autopilot_2axis/rubrics/` instead. For the April 20 rerun,
+that was `out/autopilot_2axis/rubrics/rubric_v006_2026-04-20T17-42-46.md`.
+
 ## Out of Scope
 
 - Changing the score band boundaries (still 75 / 50 / 25).
