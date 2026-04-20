@@ -14,20 +14,39 @@ class ScoreOpenRouterTests(unittest.TestCase):
 
     def test_remap_batch_results_accepts_canonical_equivalents(self):
         records = [
-            {"id": "raw:germano-cs-araújo"},
-            {"id": "raw:raphael-gonçalves-simcsik-147b323b"},
-            {"id": "raw:renatoaristeu"},
+            {"member_id": "1001", "_match_key": "raw:germano-cs-araújo", "_raw_id": "germano-cs-araújo"},
+            {"member_id": "1002", "_match_key": "raw:raphael-gonçalves-simcsik-147b323b", "_raw_id": "raphael-gonçalves-simcsik-147b323b"},
+            {"member_id": "1003", "_match_key": "raw:renatoaristeu", "_raw_id": "renatoaristeu"},
         ]
         out = [
-            {"Match Key": "raw:germano-cs-ara%C3%BAjo", "fo_persona": 1, "ft_persona": 2, "allocator": 3, "access": 4},
-            {"Match Key": "raw:renato aristeu", "fo_persona": 5, "ft_persona": 4, "allocator": 3, "access": 2},
-            {"Match Key": "raw:raphael-goncalves-simcsik-147b323b", "fo_persona": 0, "ft_persona": 1, "allocator": 2, "access": 3},
+            {"URN": "1001", "fo_persona": 1, "ft_persona": 2, "allocator": 3, "access": 4},
+            {"URN": "1003", "fo_persona": 5, "ft_persona": 4, "allocator": 3, "access": 2},
+            {"URN": "1002", "fo_persona": 0, "ft_persona": 1, "allocator": 2, "access": 3},
         ]
 
-        remapped = remap_batch_results(records, out)
+        remapped, missing = remap_batch_results(records, out)
 
-        self.assertEqual([item["Match Key"] for item in remapped], [record["id"] for record in records])
+        self.assertEqual(missing, [])
+        self.assertEqual([item["Match Key"] for item in remapped], [record["_match_key"] for record in records])
         self.assertEqual([item["fo_persona"] for item in remapped], [1, 0, 5])
+
+    def test_remap_batch_results_returns_missing_for_partial_output(self):
+        records = [
+            {"member_id": "1001", "_match_key": "raw:a", "_raw_id": "a"},
+            {"member_id": "1002", "_match_key": "raw:b", "_raw_id": "b"},
+            {"member_id": "1003", "_match_key": "raw:c", "_raw_id": "c"},
+        ]
+        # Model only returned 2 of 3 records.
+        out = [
+            {"URN": "1001", "fo_persona": 1, "ft_persona": 2, "allocator": 3, "access": 4},
+            {"URN": "1003", "fo_persona": 5, "ft_persona": 4, "allocator": 3, "access": 2},
+        ]
+
+        remapped, missing = remap_batch_results(records, out)
+
+        self.assertEqual(len(remapped), 2)
+        self.assertEqual([item["Match Key"] for item in remapped], ["raw:a", "raw:c"])
+        self.assertEqual([rec["member_id"] for rec in missing], ["1002"])
 
     def test_maybe_recover_capacity_steps_back_up_after_cooldown(self):
         last_adjustment_at = time.monotonic() - 1000

@@ -5,6 +5,7 @@ import time
 from collections import deque
 from pathlib import Path
 
+from utils import make_autopilot_header_lines, make_autopilot_row_line
 from writeback_status import format_duration, read_json_status
 
 
@@ -53,6 +54,13 @@ def count_lines(path: Path):
         return sum(1 for _ in f)
 
 
+def safe_count_progress_rows(path: Path):
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return sum(1 for line in f if line.strip())
+
+
 def fmt_mtime(path: Path):
     if not path.exists():
         return "n/a"
@@ -84,8 +92,30 @@ def latest_jsonl_row(path: Path):
         return {"raw": last}
 
 
+def read_recent_jsonl(path: Path, count: int):
+    if not path.exists():
+        return []
+    rows = deque(maxlen=count)
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(json.loads(line))
+            except Exception:
+                rows.append({"raw": line})
+    return list(rows)
+
+
 def status_line(label, value):
     return f"{label:<20} {value}"
+
+
+def format_pct(value):
+    if value is None or value == "":
+        return "n/a"
+    return f"{float(value):.1%}"
 
 
 def compact_notion_status(notion_status, notion_summary):
@@ -134,11 +164,72 @@ def render(workdir: Path, tail_n: int, compact_only: bool = False):
     delta_sync = workdir / "03_delta_sync"
     notion_sync = resolve_notion_dir(workdir)
     sync_state = workdir / ".incremental_sync_state.json"
+    autopilot_status = read_json_status(workdir / "autopilot_status.json")
 
     print("\033[2J\033[H", end="")
     print(f"Score4 progress viewer  {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"workdir: {workdir}")
     print()
+
+    if autopilot_status:
+        live_processed = autopilot_status.get("processed_rows", "n/a")
+        scores_csv_value = autopilot_status.get("current_scores_csv", "")
+        scores_csv_path = Path(scores_csv_value) if scores_csv_value else None
+        progress_value = autopilot_status.get("current_progress_jsonl", "")
+        progress_path = Path(progress_value) if progress_value else None
+        if scores_csv_path:
+            counted_rows = safe_count_csv_rows(scores_csv_path)
+            if counted_rows is not None:
+                live_processed = counted_rows
+        elif progress_path:
+            counted_rows = safe_count_progress_rows(progress_path)
+            if counted_rows is not None:
+                live_processed = counted_rows
+        print("Autopilot")
+        print(status_line("phase", autopilot_status.get("phase", "n/a")))
+        print(status_line("iteration", autopilot_status.get("iteration", "n/a")))
+        print(status_line("rubric version", autopilot_status.get("rubric_version", "n/a")))
+        print(status_line("best version", autopilot_status.get("best_version", "n/a")))
+        print(status_line("processed", f"{live_processed} / {autopilot_status.get('total_rows', 'n/a')}"))
+        if autopilot_status.get("scoring_model"):
+            print(status_line("scoring model", autopilot_status.get("scoring_model")))
+        if autopilot_status.get("rubric_model"):
+            print(status_line("rubric model", autopilot_status.get("rubric_model")))
+        # Prefer share-of-total (FP + FN + match == 100%) when available,
+        # falling back to class-conditional rates for back-compat.
+        current_fp = autopilot_status.get("current_fp_share", autopilot_status.get("current_fp_rate"))
+        if current_fp is None:
+            current_fp = autopilot_status.get("baseline_fp_share", autopilot_status.get("baseline_fp_rate"))
+        current_fn = autopilot_status.get("current_fn_share", autopilot_status.get("current_fn_rate"))
+        if current_fn is None:
+            current_fn = autopilot_status.get("baseline_fn_share", autopilot_status.get("baseline_fn_rate"))
+        current_or_baseline_match = autopilot_status.get("current_match_rate")
+        if current_or_baseline_match is None:
+            current_or_baseline_match = autopilot_status.get("baseline_match_rate")
+        print(status_line("FP", format_pct(current_fp)))
+        print(status_line("FN", format_pct(current_fn)))
+        print(status_line("match", format_pct(current_or_baseline_match)))
+        if autopilot_status.get("baseline_match_rate") is not None:
+            print(status_line("baseline match", format_pct(autopilot_status.get("baseline_match_rate"))))
+        if autopilot_status.get("baseline_fp_share", autopilot_status.get("baseline_fp_rate")) is not None:
+            print(status_line("baseline fp", format_pct(autopilot_status.get("baseline_fp_share", autopilot_status.get("baseline_fp_rate")))))
+        if autopilot_status.get("baseline_fn_share", autopilot_status.get("baseline_fn_rate")) is not None:
+            print(status_line("baseline fn", format_pct(autopilot_status.get("baseline_fn_share", autopilot_status.get("baseline_fn_rate")))))
+        if autopilot_status.get("best_match_rate") is not None:
+            print(status_line("best match", format_pct(autopilot_status.get("best_match_rate"))))
+        if autopilot_status.get("best_fp_share", autopilot_status.get("best_fp_rate")) is not None:
+            print(status_line("best fp", format_pct(autopilot_status.get("best_fp_share", autopilot_status.get("best_fp_rate")))))
+        if autopilot_status.get("best_fn_share", autopilot_status.get("best_fn_rate")) is not None:
+            print(status_line("best fn", format_pct(autopilot_status.get("best_fn_share", autopilot_status.get("best_fn_rate")))))
+        if autopilot_status.get("target_fp") is not None:
+            print(status_line("target fp", format_pct(autopilot_status.get("target_fp"))))
+        if autopilot_status.get("target_fn") is not None:
+            print(status_line("target fn", format_pct(autopilot_status.get("target_fn"))))
+        if autopilot_status.get("rubric_diff_summary"):
+            print(status_line("rubric diff", autopilot_status.get("rubric_diff_summary")))
+        if autopilot_status.get("semantic_diff_summary"):
+            print(status_line("semantic diff", autopilot_status.get("semantic_diff_summary")))
+        print()
 
     notion_summary = read_kv_csv(notion_sync / "notion_writeback_summary.csv")
     notion_status = read_json_status(notion_sync / "notion_writeback_status.json")
@@ -213,6 +304,45 @@ def render(workdir: Path, tail_n: int, compact_only: bool = False):
     if compact_only:
         return
 
+    if autopilot_status:
+        current_rows = read_recent_jsonl(progress_path, tail_n) if progress_path else []
+        print("Recent autopilot rows")
+        if current_rows:
+            print(make_autopilot_header_lines())
+            for row in current_rows:
+                print(make_autopilot_row_line({
+                    "done": "",
+                    "Full Name": row.get("Full Name", row.get("raw", "")),
+                    "Current Company": row.get("Current Company", ""),
+                    "fo_total": row.get("fo_total", ""),
+                    "ft_total": row.get("ft_total", ""),
+                    "score_band": row.get("score_band", ""),
+                    "company_fit": row.get("company_fit", ""),
+                    "ft_relevance": row.get("fintech_relevance", row.get("ft_relevance", "")),
+                    "allocator": row.get("allocator_power", row.get("allocator", "")),
+                    "access": row.get("access", ""),
+                    "role_fit": row.get("role_fit", ""),
+                }))
+        else:
+            print("n/a")
+        print()
+
+        diff_value = autopilot_status.get("rubric_diff_file", "")
+        diff_path = Path(diff_value) if diff_value else None
+        if diff_path and diff_path.exists():
+            print("Recent rubric diff")
+            for line in tail_lines(diff_path, tail_n):
+                print(line)
+            print()
+
+        semantic_diff_value = autopilot_status.get("semantic_diff_file", "")
+        semantic_diff_path = Path(semantic_diff_value) if semantic_diff_value else None
+        if semantic_diff_path and semantic_diff_path.exists():
+            print("Semantic rubric diff")
+            for line in tail_lines(semantic_diff_path, tail_n):
+                print(line)
+            print()
+
     print("Recent scoring rows")
     for line in score_tail[-tail_n:]:
         print(line)
@@ -227,7 +357,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default="out")
     ap.add_argument("--interval", type=float, default=2.0)
-    ap.add_argument("--tail", type=int, default=8)
+    ap.add_argument("--tail", type=int, default=32)
     ap.add_argument("--compact-only", action="store_true")
     ap.add_argument("--once", action="store_true")
     args = ap.parse_args()

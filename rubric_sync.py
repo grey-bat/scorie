@@ -171,4 +171,9 @@ def sync_rubric_snapshot(
     snapshot_text = build_snapshot_text(rubric_text, weights, bands)
     out_path = Path(out_path)
     out_path.write_text(snapshot_text, encoding="utf-8")
-    return RubricSnapshot(page_id=page_id, rubric_text=snapshot_text, config=CompositeConfig(weights=weights, legacy_weights={}, score_bands=bands), source_url=page_url)
+    return RubricSnapshot(
+        page_id=page_id,
+        rubric_text=snapshot_text,
+        config=CompositeConfig(weights=weights, legacy_weights={}, score_bands=bands, direct_point_maps={}),
+        source_url=page_url,
+    )

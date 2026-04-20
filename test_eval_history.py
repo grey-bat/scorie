@@ -20,11 +20,28 @@ class EvalHistoryTests(unittest.TestCase):
         ])
 
         with tempfile.TemporaryDirectory() as tmp:
-            snapshot = append_eval_history(reviewed, tmp)
+            snapshot = append_eval_history(reviewed, tmp, score_track="legacy_raw_weighted")
             self.assertTrue(snapshot.exists())
-            loaded = load_eval_history(tmp)
+            loaded = load_eval_history(tmp, score_track="legacy_raw_weighted")
             self.assertEqual(len(loaded), 1)
             self.assertEqual(loaded.iloc[0]["Status"], "Skip")
+
+    def test_append_and_load_direct_history(self):
+        reviewed = pd.DataFrame([
+            {
+                "Match Key": "raw:def",
+                "Status": "Sent",
+                "Reason": "",
+                "direct_score": 82,
+            }
+        ])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = append_eval_history(reviewed, tmp, score_track="autopilot_direct_100")
+            self.assertTrue(snapshot.exists())
+            loaded = load_eval_history(tmp, score_track="autopilot_direct_100")
+            self.assertEqual(len(loaded), 1)
+            self.assertEqual(loaded.iloc[0]["score_track"], "autopilot_direct_100")
 
     def test_regression_report_flags_skip_qualified_rows(self):
         candidate = pd.DataFrame([

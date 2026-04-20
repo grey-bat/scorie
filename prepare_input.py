@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -22,7 +23,9 @@ from utils import (
 LH_COLUMN_ALIASES = {
     "id": "Raw ID",
     "lh_id": "Raw ID",
+    "linkedin member urn": "LinkedIn Member URN",
     "profile_url": "LinkedIn URL",
+    "member_id": "URN",
     "email": "Best Email",
     "third_party_email_1": "Best Email",
     "full_name": "Full Name",
@@ -31,6 +34,7 @@ LH_COLUMN_ALIASES = {
     "industry": "Industry",
     "summary": "Summary",
     "mutual_count": "Mutual Count",
+    "followers": "Followers",
     "connections_count": "Connections Count",
     "current_company": "Current Company",
     "current_company_position": "Current Title",
@@ -83,10 +87,18 @@ def normalize_full_input(full: pd.DataFrame) -> pd.DataFrame:
         target = LH_COLUMN_ALIASES.get(col.lower(), col)
         normalized[target] = frame[col]
     frame = pd.DataFrame(normalized)
-    for col in ["Stage", "Berkeley Signal", "Columbia Signal"]:
+    for col in ["Stage", "Berkeley Signal", "Columbia Signal", "URN", "LinkedIn Member URN", "Location", "Followers"]:
         if col not in frame.columns:
             frame[col] = ""
     return frame
+
+
+def derive_urn(value: str) -> str:
+    text = normalize_key(value)
+    if not text:
+        return ""
+    match = re.search(r"(\d+)", text)
+    return match.group(1) if match else text
 
 
 def load_distance_map(distance_csv: str) -> pd.DataFrame:
@@ -174,16 +186,25 @@ def main():
     deduped = keyed.drop_duplicates(subset=["Match Key"], keep="first").copy()
     deduped = deduped.sort_values(["_source_order"], kind="stable").copy()
 
+    urn_series = deduped.get("URN", "").map(derive_urn)
+    if "LinkedIn Member URN" in deduped.columns:
+        linked_urn_series = deduped["LinkedIn Member URN"].map(derive_urn)
+        urn_series = urn_series.where(urn_series != "", linked_urn_series)
+    urn_series = urn_series.where(urn_series != "", deduped["Raw ID"])
+
     prepared = pd.DataFrame({
         "Match Key": deduped["Match Key"],
+        "URN": urn_series,
         "Raw ID": deduped["Raw ID"],
         "Best Email": deduped["Best Email"],
         "Full Name": deduped["Full Name"],
+        "Location": deduped.get("Location", ""),
         "Current Company": deduped["Current Company"],
         "Current Title": deduped["Current Title"],
         "Headline": deduped["Headline"],
         "Industry": deduped["Industry"],
         "Mutual Count": deduped["Mutual Count"].map(normalize_mutual_count),
+        "Followers": deduped.get("Followers", "").map(normalize_mutual_count),
         "Summary": deduped["Summary"],
         "Alumni Signal": [derive_alumni_signal_from_education(row) for _, row in deduped.iterrows()],
         "Position 1 Description": deduped["Position 1 Description"],

@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable
 from urllib.parse import unquote
 
 MODEL_CONTEXT_COLUMNS = [
+    "Location",
     "Current Company",
     "Current Title",
     "Industry",
@@ -32,6 +33,7 @@ MODEL_CONTEXT_COLUMNS = [
     "Company Context Score",
     "Headline",
     "Mutual Count",
+    "Followers",
     "Degree",
     "Summary",
     "Alumni Signal",
@@ -40,7 +42,7 @@ MODEL_CONTEXT_COLUMNS = [
     "Position 3 Description",
 ]
 
-PREPARED_OUTPUT_COLUMNS = ["Match Key", "Raw ID", "Best Email", "Full Name", *MODEL_CONTEXT_COLUMNS]
+PREPARED_OUTPUT_COLUMNS = ["Match Key", "URN", "Raw ID", "Best Email", "Full Name", *MODEL_CONTEXT_COLUMNS]
 
 RAW_SCORE_COLUMNS = {
     "fo_persona": "Persona Signal - Family Office",
@@ -48,6 +50,15 @@ RAW_SCORE_COLUMNS = {
     "allocator": "Allocator Score",
     "access": "Access Score",
     "company_fit": "Company Fit Score",
+}
+
+DIRECT_SCORE_COLUMNS = {
+    "company_fit": "Company Fit Points",
+    "family_office_relevance": "Family Office Relevance Points",
+    "fintech_relevance": "Fintech Relevance Points",
+    "allocator_power": "Allocator Power Points",
+    "access": "Access Points",
+    "role_fit": "Role Fit Points",
 }
 
 DISPLAY_COLUMNS = [
@@ -62,6 +73,21 @@ DISPLAY_COLUMNS = [
     ("access", 6, "Access"),
     ("Headline", 42, "Headline"),
     ("Summary", 60, "Summary"),
+]
+
+AUTOPILOT_DISPLAY_COLUMNS = [
+    ("done", 6, "Cnt"),
+    ("Full Name", 24, "Name"),
+    ("Current Company", 24, "Company"),
+    ("Manual", 6, "Manual"),
+    ("fo_total", 7, "FO Tot"),
+    ("ft_total", 7, "FT Tot"),
+    ("score_band", 10, "Band"),
+    ("company_fit", 5, "CoFit"),
+    ("ft_relevance", 5, "FT"),
+    ("allocator", 5, "Alloc"),
+    ("access", 6, "Access"),
+    ("role_fit", 4, "Role"),
 ]
 
 STAGE_RANK = {
@@ -116,6 +142,13 @@ def normalize_email(value: Any) -> str:
     return normalize_text(value).lower()
 
 
+def spreadsheet_text(value: Any) -> str:
+    text = normalize_text(value)
+    if not text:
+        return ""
+    return f"'{text}"
+
+
 def truthy_field(value: Any) -> bool:
     return normalize_text(value) != ""
 
@@ -144,8 +177,17 @@ def derive_alumni_signal_from_education(row: Dict[str, Any]) -> str:
             "education_3",
         )
     ).lower()
-    has_berkeley = "berkeley" in education_blob or "uc berkeley" in education_blob or "university of california" in education_blob
-    has_columbia = "columbia" in education_blob
+    has_berkeley = (
+        "berkeley" in education_blob
+        or "uc berkeley" in education_blob
+        or "haas school of business" in education_blob
+    )
+    has_columbia = (
+        "columbia" in education_blob
+        or "columbia business school" in education_blob
+        or "columbia university" in education_blob
+        or re.search(r"\bcbs\b", education_blob) is not None
+    )
     if has_berkeley and has_columbia:
         return "Cal+CBS"
     if has_berkeley:
@@ -264,20 +306,36 @@ def truncate(value: Any, width: int) -> str:
     return s[: width - 2] + ".."
 
 
-def make_row_line(row: Dict[str, Any]) -> str:
+def _make_line(row: Dict[str, Any], columns) -> str:
     parts = []
-    for key, width, _label in DISPLAY_COLUMNS:
+    for key, width, _label in columns:
         parts.append(truncate(row.get(key, ""), width))
     return "| " + " | ".join(parts) + " |"
 
 
-def make_header_lines() -> str:
+def make_row_line(row: Dict[str, Any]) -> str:
+    return _make_line(row, DISPLAY_COLUMNS)
+
+
+def make_autopilot_row_line(row: Dict[str, Any]) -> str:
+    return _make_line(row, AUTOPILOT_DISPLAY_COLUMNS)
+
+
+def _make_header_lines(columns) -> str:
     labels = []
-    for _key, width, label in DISPLAY_COLUMNS:
+    for _key, width, label in columns:
         labels.append(label.ljust(width))
     header = "| " + " | ".join(labels) + " |"
     rule = "-" * len(header)
     return f"{rule}\n{header}\n{rule}"
+
+
+def make_header_lines() -> str:
+    return _make_header_lines(DISPLAY_COLUMNS)
+
+
+def make_autopilot_header_lines() -> str:
+    return _make_header_lines(AUTOPILOT_DISPLAY_COLUMNS)
 
 
 def parse_json_from_content(content: str):

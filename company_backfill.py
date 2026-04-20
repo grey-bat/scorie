@@ -7,7 +7,7 @@ from typing import Iterable
 
 import pandas as pd
 
-from utils import canonical_match_key, canonicalize_identifier, normalize_key, normalize_text
+from utils import canonical_match_key, canonicalize_identifier, normalize_key, normalize_text, spreadsheet_text
 
 
 BACKFILL_PRIORITY = {"visit": 3, "credits": 2, "nodata": 1, "native": 0}
@@ -346,4 +346,7 @@ def select_company_backfill_candidates(scored: pd.DataFrame, min_weighted_score:
         if c in candidates.columns
     ]
     ordered = [c for c in ["weighted_score", "Company Context Score"] if c in candidates.columns]
-    return candidates[candidate_cols].sort_values(ordered, ascending=[False] * len(ordered), kind="stable") if ordered else candidates[candidate_cols]
+    output = candidates[candidate_cols].sort_values(ordered, ascending=[False] * len(ordered), kind="stable") if ordered else candidates[candidate_cols]
+    if "Raw ID" in output.columns:
+        output["Raw ID"] = output["Raw ID"].map(spreadsheet_text)
+    return output
