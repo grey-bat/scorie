@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import re
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ from pathlib import Path
 from typing import Mapping
 
 import requests
+from dotenv import load_dotenv
 
 from composite_formula import DEFAULT_SCORE_BANDS, DEFAULT_WEIGHTS, CompositeConfig
 
@@ -15,6 +17,11 @@ DEFAULT_RUBRIC_PAGE_URL = os.getenv(
     "https://www.notion.so/inpt/Current-Rubric-April-15-2026-344ec57f140d806c9370e7b6e28240dc",
 )
 DEFAULT_RUBRIC_PAGE_ID = os.getenv("NOTION_RUBRIC_PAGE_ID", "344ec57f140d806c9370e7b6e28240dc")
+DEFAULT_2AXIS_RUBRIC_PAGE_URL = os.getenv(
+    "NOTION_2AXIS_RUBRIC_PAGE_URL",
+    "https://www.notion.so/inpt/Scoring-Rubric-2-Axis-d31a47ec5fee40a49f09765f5d13a5c0?source=copy_link",
+)
+DEFAULT_2AXIS_RUBRIC_PAGE_ID = os.getenv("NOTION_2AXIS_RUBRIC_PAGE_ID", "d31a47ec5fee40a49f09765f5d13a5c0")
 NOTION_VERSION = os.getenv("NOTION_VERSION", "2026-03-11")
 
 
@@ -33,6 +40,8 @@ def _page_id_from_url(url: str) -> str:
     match = re.search(r"([0-9a-f-]{36})$", url, re.I)
     if match:
         return match.group(1).replace("-", "")
+    if "Scoring-Rubric-2-Axis" in url or "d31a47ec5fee40a49f09765f5d13a5c0" in url:
+        return DEFAULT_2AXIS_RUBRIC_PAGE_ID
     return DEFAULT_RUBRIC_PAGE_ID
 
 
@@ -177,3 +186,50 @@ def sync_rubric_snapshot(
         config=CompositeConfig(weights=weights, legacy_weights={}, score_bands=bands, direct_point_maps={}),
         source_url=page_url,
     )
+
+
+def sync_2axis_rubric_latest(
+    page_url: str = DEFAULT_2AXIS_RUBRIC_PAGE_URL,
+    *,
+    out_path: str | Path = "rubric_latest.md",
+    api_key: str | None = None,
+) -> RubricSnapshot:
+    page_id, page_text = fetch_notion_page_text(page_url, api_key=api_key)
+    rubric_text = page_text.strip() + "\n"
+    out_path = Path(out_path)
+    out_path.write_text(rubric_text, encoding="utf-8")
+    return RubricSnapshot(
+        page_id=page_id,
+        rubric_text=rubric_text,
+        config=CompositeConfig(weights={}, legacy_weights={}, score_bands={}, direct_point_maps={}),
+        source_url=page_url,
+    )
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--mode", choices=["legacy_snapshot", "2axis_latest"], default="2axis_latest")
+    ap.add_argument("--page-url", default=None)
+    ap.add_argument("--out", default=None)
+    return ap
+
+
+def main() -> None:
+    load_dotenv()
+    args = build_arg_parser().parse_args()
+    if args.mode == "legacy_snapshot":
+        snapshot = sync_rubric_snapshot(
+            page_url=args.page_url or DEFAULT_RUBRIC_PAGE_URL,
+            out_path=args.out or "scoring_rubric.md",
+        )
+    else:
+        snapshot = sync_2axis_rubric_latest(
+            page_url=args.page_url or DEFAULT_2AXIS_RUBRIC_PAGE_URL,
+            out_path=args.out or "rubric_latest.md",
+        )
+    print(snapshot.page_id)
+    print(snapshot.source_url)
+
+
+if __name__ == "__main__":
+    main()

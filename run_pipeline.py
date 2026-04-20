@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from autopilot_calibrate import autopilot_calibrate
 from company_backfill import select_company_backfill_candidates
 from review_queue import write_review_queue
-from rubric_sync import sync_rubric_snapshot
+from rubric_sync import sync_2axis_rubric_latest, sync_rubric_snapshot
 
 
 def run(cmd):
@@ -45,6 +45,7 @@ def main():
     ap.add_argument("--full", default="data/full.csv")
     ap.add_argument("--distance-csv", default="data/everything.csv")
     ap.add_argument("--workdir", default="run_output")
+    ap.add_argument("--rubric-path", default="rubric_latest.md")
     ap.add_argument("--model", default=os.getenv("OPENROUTER_MODEL", "z-ai/glm-5.1"))
     ap.add_argument("--rubric-model", default=os.getenv("OPENROUTER_RUBRIC_MODEL", "z-ai/glm-5.1"))
     ap.add_argument("--company-backfill-dir", default=os.getenv("COMPANY_BACKFILL_DIR", "."))
@@ -90,16 +91,30 @@ def main():
     backfill = wd / "05_backfill"
     notion = wd / "04_notion"
 
-    if os.getenv("NOTION_API_KEY"):
+    rubric_path = str(Path(args.rubric_path))
+
+    rubric_filename = Path(rubric_path).name
+
+    if os.getenv("NOTION_API_KEY") and rubric_filename == "scoring_rubric.md":
         try:
-            sync_rubric_snapshot(out_path="scoring_rubric.md")
+            sync_rubric_snapshot(out_path=rubric_path)
         except Exception as exc:
             print(
-                f"Notion rubric sync failed ({exc}); using checked-in scoring_rubric.md snapshot instead.",
+                f"Notion rubric sync failed ({exc}); using checked-in {rubric_path} snapshot instead.",
                 flush=True,
             )
+    elif os.getenv("NOTION_API_KEY") and rubric_filename == "rubric_latest.md":
+        try:
+            sync_2axis_rubric_latest(out_path=rubric_path)
+        except Exception as exc:
+            print(
+                f"2-axis Notion rubric sync failed ({exc}); using checked-in {rubric_path} snapshot instead.",
+                flush=True,
+            )
+    elif os.getenv("NOTION_API_KEY"):
+        print(f"Skipping Notion rubric sync; using explicit rubric path {rubric_path}.", flush=True)
     else:
-        print("NOTION_API_KEY is not set; using the checked-in scoring_rubric.md snapshot.", flush=True)
+        print(f"NOTION_API_KEY is not set; using the checked-in {rubric_path} snapshot.", flush=True)
 
     if args.autopilot:
         write_live_status(
@@ -154,7 +169,7 @@ def main():
         autopilot_args = argparse.Namespace(
             workdir=str(wd),
             manual_labels_csv=args.manual_labels_csv,
-            rubric_path="scoring_rubric.md",
+            rubric_path=rubric_path,
             model=args.model,
             scoring_model=args.model,
             rubric_model=args.rubric_model,
@@ -186,7 +201,7 @@ def main():
         "--model", args.model,
         "--start-row", str(args.start_row),
         "--scoring-mode", args.scoring_mode,
-        "--rubric-path", "scoring_rubric.md",
+        "--rubric-path", rubric_path,
     ]
     if args.safe:
         score_cmd += ["--speed", "safe"]

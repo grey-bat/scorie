@@ -1409,7 +1409,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--manual-labels-csv", required=True)
-    ap.add_argument("--rubric-path", default="scoring_rubric.md")
+    ap.add_argument("--rubric-path", default="rubric_latest.md")
     ap.add_argument("--model", default=os.getenv("OPENROUTER_MODEL", "minimax/minimax-m2.7"))
     ap.add_argument("--scoring-model", default=os.getenv("OPENROUTER_SCORING_MODEL", "google/gemini-3.1-flash-lite-preview"))
     ap.add_argument("--rubric-model", default=os.getenv("OPENROUTER_RUBRIC_MODEL", DEFAULT_RUBRIC_MODEL))

@@ -8,14 +8,18 @@
 ## Status
 - Active — production pipeline, tested against real Notion database
 - Scoring works end-to-end; incremental sync stable
-- Known gap: no `.env.example` — must set env vars manually
+- Current production path is the 2-axis rubric in top-level `rubric_latest.md`, with version history preserved under `out/autopilot_2axis/rubrics/`
+- Known gap: no checked-in `.env.example`; create `.env` manually
 
 ## Quick Start
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # edit with your keys
-python run_pipeline.py --full data/full.csv --distance-csv data/everything.csv
+cat > .env <<'EOF'
+OPENROUTER_API_KEY=...
+NOTION_API_KEY=...
+NOTION_DATABASE_ID=...
+EOF
 ```
 
 ## Commands
@@ -36,6 +40,23 @@ python run_pipeline.py --full data/full.csv --distance-csv data/everything.csv
 - `OPENROUTER_MODEL` — model slug (default: `minimax/minimax-m2.7`)
 - `OPENROUTER_SCORING_MODEL` — scoring-model slug for autopilot (default: `z-ai/glm-5.1`)
 - `OPENROUTER_RUBRIC_MODEL` — rubric-rewrite model slug for autopilot (default: `google/gemini-3.1-pro-preview`)
+
+## Recommended Operator Path
+For the simplified workflow, treat the repo as three separate commands instead of one
+big orchestrator:
+
+1. `autopilot_calibrate.py` to produce a promoted rubric under `out/autopilot_2axis/rubrics/` and sync the active copy to `rubric_latest.md`
+2. `score_openrouter.py` to run one-off scoring against `rubric_latest.md`
+3. `write_2axis_v2_to_notion.py` to write `Fintech Score v2`, `Role Fit v2`, and `Company Fit v2`
+
+`run_pipeline.py` still exists for the legacy all-in-one path, but it is no longer the
+recommended production entrypoint for the April 20 2-axis workflow.
+
+Refresh the active top-level rubric from Notion with:
+
+```bash
+.venv/bin/python rubric_sync.py --mode 2axis_latest --out rubric_latest.md
+```
 
 ## Autopilot Calibration
 `autopilot_calibrate.py` iteratively rewrites `scoring_rubric.md` against the
@@ -91,9 +112,9 @@ python autopilot_calibrate.py \
   --batch-size 10 --concurrency 12
 ```
 
-For production one-off rescoring runs, use the promoted rubric artifact under
-`out/autopilot_2axis/rubrics/` rather than assuming the checked-in
-`scoring_rubric_2axis.md` is still the best version:
+For production one-off rescoring runs, use the top-level `rubric_latest.md`.
+That file should track the current Notion 2-axis rubric page, while the
+versioned artifacts remain in `out/autopilot_2axis/rubrics/`:
 
 ```bash
 .venv/bin/python score_openrouter.py \
@@ -101,7 +122,7 @@ For production one-off rescoring runs, use the promoted rubric artifact under
   --out out/65_and_higher_v006/02_score \
   --model google/gemini-3-flash-preview \
   --scoring-mode autopilot_direct_100 \
-  --rubric-path out/autopilot_2axis/rubrics/rubric_v006_2026-04-20T17-42-46.md \
+  --rubric-path rubric_latest.md \
   --batch-size 10 \
   --concurrency 12
 ```

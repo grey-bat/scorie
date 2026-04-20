@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from rubric_sync import sync_rubric_snapshot
+from rubric_sync import sync_2axis_rubric_latest, sync_rubric_snapshot
 
 
 class RubricSyncTests(unittest.TestCase):
@@ -40,6 +40,18 @@ class RubricSyncTests(unittest.TestCase):
             with patch("rubric_sync.fetch_notion_page_text", return_value=("page-1", "## Weights\n- fo_persona = 0.18")):
                 with self.assertRaisesRegex(RuntimeError, "Score Bands"):
                     sync_rubric_snapshot(out_path=out_path)
+
+    def test_sync_2axis_rubric_latest_writes_page_text_verbatim(self):
+        page_text = "# Scoring Rubric 2 Axis\n\n## Company Fit\n- 70"
+        with tempfile.TemporaryDirectory() as tmp:
+            out_path = Path(tmp) / "rubric_latest.md"
+            with patch("rubric_sync.fetch_notion_page_text", return_value=("page-2", page_text)):
+                snapshot = sync_2axis_rubric_latest(out_path=out_path)
+
+            self.assertEqual(snapshot.page_id, "page-2")
+            self.assertEqual(snapshot.source_url, "https://www.notion.so/inpt/Scoring-Rubric-2-Axis-d31a47ec5fee40a49f09765f5d13a5c0?source=copy_link")
+            self.assertTrue(out_path.exists())
+            self.assertEqual(out_path.read_text(encoding="utf-8"), page_text + "\n")
 
 
 if __name__ == "__main__":
