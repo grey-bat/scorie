@@ -382,9 +382,18 @@ def build_write_jobs(
 
     publish("matching")
     write_jobs: list = []
-    for row_number, (_, row) in enumerate(delta.iterrows(), start=1):
-        mk = row.get("Match Key", "")
-        rid, email = row["Raw ID"], row["Best Email"]
+
+    match_key_idx = delta.columns.get_loc("Match Key") + 1 if "Match Key" in delta.columns else None
+    raw_id_idx = delta.columns.get_loc("Raw ID") + 1 if "Raw ID" in delta.columns else None
+    best_email_idx = delta.columns.get_loc("Best Email") + 1 if "Best Email" in delta.columns else None
+
+    payload_cols = required_targets + optional_targets
+    payload_indices = {col: delta.columns.get_loc(col) + 1 for col in payload_cols if col in delta.columns}
+
+    for row_number, row in enumerate(delta.itertuples(), start=1):
+        mk = row[match_key_idx] if match_key_idx is not None else ""
+        rid = row[raw_id_idx] if raw_id_idx is not None else None
+        email = row[best_email_idx] if best_email_idx is not None else None
         page = None
         if rid:
             matches = raw_cache.get(rid, [])
@@ -413,8 +422,7 @@ def build_write_jobs(
             publish("matching")
             continue
         page_id = page["id"]
-        payload_cols = required_targets + optional_targets
-        payload = {"properties": {col: notion_set_payload(target_types[col], row[col]) for col in payload_cols if col in row.index}}
+        payload = {"properties": {col: notion_set_payload(target_types[col], row[idx]) for col, idx in payload_indices.items()}}
         if page_matches_payload(page, payload, target_types):
             counters["noop"] += 1
             logs.append({"Match Key": mk, "status": "noop", "page_id": page_id})
