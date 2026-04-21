@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,27 @@ class CompanyBackfillTests(unittest.TestCase):
         sources = load_company_sources(repo_root)
         self.assertFalse(sources.empty)
         self.assertTrue({"nodata", "visit", "credits"}.intersection(set(sources["backfill_mode"].dropna().unique())))
+
+    def test_load_company_sources_skips_malformed_csv(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+
+            # Create a valid CSV file
+            valid_file = temp_path / "valid_visit.csv"
+            valid_df = pd.DataFrame([{"id": "1", "name": "Company A"}])
+            valid_df.to_csv(valid_file, index=False)
+
+            # Create an empty file to simulate a malformed/empty CSV
+            # This triggers pandas.errors.EmptyDataError
+            malformed_file = temp_path / "invalid_nodata.csv"
+            malformed_file.write_text("")
+
+            sources = load_company_sources(temp_path)
+
+            # Assert only the valid file is loaded
+            self.assertEqual(len(sources), 1)
+            self.assertEqual(sources.iloc[0]["id"], "1")
+            self.assertEqual(sources.iloc[0]["__source_name"], "valid_visit")
 
     def test_enrich_company_context_uses_sample_backfill(self):
         repo_root = Path(__file__).resolve().parent
