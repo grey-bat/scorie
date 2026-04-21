@@ -82,6 +82,17 @@ class WritebackStatusTests(unittest.TestCase):
             self.assertEqual(loaded["total_rows"], 1)
             self.assertEqual(loaded["updated_rows"], 1)
 
+    def test_read_json_status_returns_none_for_missing_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "does_not_exist.json"
+            self.assertIsNone(read_json_status(path))
+
+    def test_read_json_status_returns_none_for_malformed_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "malformed.json"
+            path.write_text("{this is not valid json:", encoding="utf-8")
+            self.assertIsNone(read_json_status(path))
+
 
 if __name__ == "__main__":
     unittest.main()
