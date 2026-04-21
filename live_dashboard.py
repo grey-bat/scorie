@@ -15,21 +15,19 @@ import argparse
 import csv
 import json
 import re
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-
 
 WORKDIR = Path(".")  # set at startup
 RUN_LOG_TAIL_BYTES = 120_000
 ROW_REGEX = re.compile(r"^\|\s*\d")
-
 
 def count_csv_rows(path: Path) -> int | None:
     if not path.exists():
         return None
     with path.open(newline="", encoding="utf-8", errors="replace") as f:
         return max(0, sum(1 for _ in csv.reader(f)) - 1)
-
 
 def read_jsonl_rows(path: Path, limit: int = 10) -> list[dict]:
     if not path.exists():
@@ -45,7 +43,6 @@ def read_jsonl_rows(path: Path, limit: int = 10) -> list[dict]:
             except Exception:
                 continue
     return out[-limit:]
-
 
 def format_recent_score_rows(limit: int = 10) -> list[str]:
     progress_path = WORKDIR / "02_score" / "scores_progress.jsonl"
@@ -64,7 +61,6 @@ def format_recent_score_rows(limit: int = 10) -> list[str]:
             f"{i:>2}. {name} | {company} | total={ft_total} | company_fit={company_fit} | role_fit={role_fit} | {band}"
         )
     return out
-
 
 def read_status() -> dict:
     p = WORKDIR / "autopilot_status.json"
@@ -93,7 +89,6 @@ def read_status() -> dict:
     except Exception as e:
         return {"error": repr(e)}
 
-
 def read_iter_metrics() -> list[dict]:
     rows: list[dict] = []
     for d in sorted(WORKDIR.glob("autopilot_iter_*")):
@@ -113,7 +108,6 @@ def read_iter_metrics() -> list[dict]:
             rows.append({"iteration_dir": d.name, "error": repr(e)})
     return rows
 
-
 def read_recent_rows(limit: int = 30) -> list[str]:
     if (WORKDIR / "02_score" / "scores_progress.jsonl").exists():
         return format_recent_score_rows(limit=min(limit, 10))
@@ -132,7 +126,6 @@ def read_recent_rows(limit: int = 30) -> list[str]:
             out.append(line)
     return out[-limit:]
 
-
 def latest_errors(limit: int = 10) -> list[str]:
     p = WORKDIR / "run.log"
     if not p.exists():
@@ -150,54 +143,107 @@ def latest_errors(limit: int = 10) -> list[str]:
             out.append(line)
     return out[-limit:]
 
-
 HTML = """<!doctype html>
-<html>
+<html lang="en" class="dark">
 <head>
 <meta charset="utf-8">
-<title>SCORie live status</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCORie Live Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    darkMode: 'class',
+    theme: {
+      extend: {
+        colors: {
+          gray: {
+            800: '#1c2128',
+            900: '#0e1116',
+          }
+        }
+      }
+    }
+  }
+</script>
 <style>
-  body { font-family: ui-monospace, Menlo, Consolas, monospace; margin: 24px; background: #0e1116; color: #cdd6dc; }
-  h1 { color: #f0f0f0; margin: 0 0 8px 0; }
-  h2 { color: #82aaff; margin: 20px 0 8px 0; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
-  .status { display: grid; grid-template-columns: 180px auto; gap: 4px 16px; font-size: 13px; }
-  .status .k { color: #8b949e; }
-  .status .v { color: #e8ecf0; }
-  .kpi { display: inline-block; margin: 0 12px 8px 0; padding: 6px 12px; background: #1c2128; border-radius: 6px; border: 1px solid #30363d; }
-  .kpi .label { color: #8b949e; font-size: 10px; text-transform: uppercase; }
-  .kpi .value { color: #e8ecf0; font-size: 18px; font-weight: bold; }
+  body { font-family: ui-monospace, Menlo, Consolas, monospace; background: #0e1116; color: #cdd6dc; }
+  .table-row-best { background-color: #16251a !important; }
   .over-target { color: #ff6b6b !important; }
   .under-target { color: #7ee787 !important; }
-  table { border-collapse: collapse; font-size: 12px; width: 100%; }
-  th { text-align: left; color: #8b949e; padding: 4px 8px; border-bottom: 1px solid #30363d; position: sticky; top: 0; background: #0e1116; }
-  td { padding: 3px 8px; border-bottom: 1px solid #1c2128; }
-  tr.GOOD td.manual { color: #7ee787; }
-  tr.SKIP td.manual { color: #ffa657; }
-  tr.best { background: #16251a; }
-  pre { background: #1c2128; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 11px; color: #a5d6ff; }
-  .muted { color: #6e7681; font-size: 11px; }
+  .text-muted { color: #8b949e; }
+  .bg-card { background: #1c2128; border: 1px solid #30363d; }
+  .border-b-subtle { border-bottom: 1px solid #30363d; }
 </style>
 </head>
-<body>
-  <h1>SCORie — live status</h1>
-  <div class="muted" id="updated">loading…</div>
+<body class="p-6 max-w-7xl mx-auto">
+  <div class="flex justify-between items-center mb-6">
+    <h1 class="text-2xl font-bold text-gray-100">SCORie Live Dashboard</h1>
+    <div class="text-xs text-muted" id="updated">loading…</div>
+  </div>
 
-  <h2>kpis</h2>
-  <div id="kpis"></div>
+  <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+    <!-- Main KPIs -->
+    <div class="lg:col-span-2">
+      <h2 class="text-sm font-semibold text-blue-400 uppercase tracking-wider mb-3">KPIs</h2>
+      <div id="kpis" class="grid grid-cols-2 sm:grid-cols-4 gap-3"></div>
+    </div>
 
-  <h2>status</h2>
-  <div class="status" id="status"></div>
+    <!-- Upload Section -->
+    <div class="bg-card rounded-lg p-4">
+      <h2 class="text-sm font-semibold text-blue-400 uppercase tracking-wider mb-3">LinkedHelper Backfill</h2>
+      <p class="text-xs text-muted mb-3">Provide a Google Drive link or upload a CSV file to add company sources.</p>
 
-  <h2>per-iteration metrics</h2>
-  <table id="iters"><thead><tr>
-    <th>iter</th><th>match</th><th>fp_share</th><th>fn_share</th><th>sum</th><th>separation</th><th>combined_error</th>
-  </tr></thead><tbody></tbody></table>
+      <form id="uploadForm" class="space-y-3" onsubmit="submitLinkedHelper(event)">
+        <div>
+            <label class="block text-xs font-medium text-gray-300 mb-1">Google Drive Link</label>
+            <input type="text" id="gdriveLink" name="gdrive_link" class="w-full bg-gray-900 border border-gray-700 rounded p-2 text-xs text-gray-200 focus:outline-none focus:border-blue-500" placeholder="https://drive.google.com/file/d/...">
+        </div>
+        <div class="text-xs text-center text-muted">- OR -</div>
+        <div>
+            <label class="block text-xs font-medium text-gray-300 mb-1">CSV File</label>
+            <input type="file" id="csvFile" name="csv_file" accept=".csv" class="w-full text-xs text-gray-300 file:mr-4 file:py-1 file:px-2 file:rounded file:border-0 file:text-xs file:bg-gray-700 file:text-gray-200 hover:file:bg-gray-600 cursor-pointer">
+        </div>
+        <button type="submit" id="submitBtn" class="w-full bg-blue-600 hover:bg-blue-700 text-white text-xs font-medium py-2 px-4 rounded transition">Submit</button>
+        <div id="uploadStatus" class="text-xs mt-2 hidden"></div>
+      </form>
+    </div>
+  </div>
 
-  <h2>last 10 rows</h2>
-  <pre id="rows"></pre>
+  <div class="mb-8">
+    <h2 class="text-sm font-semibold text-blue-400 uppercase tracking-wider mb-3">Status</h2>
+    <div class="bg-card rounded-lg p-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-x-4 gap-y-2 text-sm" id="status"></div>
+  </div>
 
-  <h2>recent events</h2>
-  <pre id="events"></pre>
+  <div class="mb-8 overflow-x-auto">
+    <h2 class="text-sm font-semibold text-blue-400 uppercase tracking-wider mb-3">Per-iteration Metrics</h2>
+    <div class="bg-card rounded-lg overflow-hidden border border-gray-700">
+      <table class="w-full text-left text-sm" id="iters">
+        <thead class="bg-gray-900 text-muted">
+          <tr>
+            <th class="px-4 py-3 font-medium border-b-subtle">Iter</th>
+            <th class="px-4 py-3 font-medium border-b-subtle">Match</th>
+            <th class="px-4 py-3 font-medium border-b-subtle">FP Share</th>
+            <th class="px-4 py-3 font-medium border-b-subtle">FN Share</th>
+            <th class="px-4 py-3 font-medium border-b-subtle">Sum</th>
+            <th class="px-4 py-3 font-medium border-b-subtle">Separation</th>
+            <th class="px-4 py-3 font-medium border-b-subtle">Combined Error</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-800"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+    <div>
+      <h2 class="text-sm font-semibold text-blue-400 uppercase tracking-wider mb-3">Last 10 Rows</h2>
+      <pre id="rows" class="bg-card rounded-lg p-4 text-xs text-blue-300 overflow-x-auto h-64 border border-gray-700 whitespace-pre"></pre>
+    </div>
+    <div>
+      <h2 class="text-sm font-semibold text-blue-400 uppercase tracking-wider mb-3">Recent Events</h2>
+      <pre id="events" class="bg-card rounded-lg p-4 text-xs text-blue-300 overflow-x-auto h-64 border border-gray-700 whitespace-pre"></pre>
+    </div>
+  </div>
 
 <script>
 const fmtPct = (v) => (v == null || isNaN(v)) ? '—' : (100*v).toFixed(1) + '%';
@@ -209,65 +255,141 @@ async function refresh() {
     const r = await fetch('/api/all');
     const d = await r.json();
     const s = d.status || {};
-    document.getElementById('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+    document.getElementById('updated').textContent = 'Updated ' + new Date().toLocaleTimeString();
 
     // KPIs
     const bm = s.best_metrics || {};
     const cm = s.current_metrics || {};
     const bam = s.baseline_metrics || {};
     const tfp = s.target_fp, tfn = s.target_fn;
-    const kpis = [
-      ['phase', s.phase || '—'],
-      ['progress', fmtCount(s.processed_rows ?? s.processed, s.total_rows)],
-      ['mode', s.mode || (d.iters || []).length ? 'autopilot' : 'single-pass'],
-      ['best match', fmtPct(bm.match_rate), 'under-target'],
-      ['best fp', fmtPct(bm.fp_share), cls(bm.fp_share, tfp, true)],
-      ['best fn', fmtPct(bm.fn_share), cls(bm.fn_share, tfn, true)],
-      ['target fp', fmtPct(tfp)],
-      ['target fn', fmtPct(tfn)],
+
+    const kpiData = [
+      { label: 'Phase', value: s.phase || '—' },
+      { label: 'Progress', value: fmtCount(s.processed_rows ?? s.processed, s.total_rows) },
+      { label: 'Mode', value: s.mode || ((d.iters || []).length ? 'autopilot' : 'single-pass') },
+      { label: 'Best Match', value: fmtPct(bm.match_rate), color: 'under-target' },
+      { label: 'Best FP', value: fmtPct(bm.fp_share), color: cls(bm.fp_share, tfp, true) },
+      { label: 'Best FN', value: fmtPct(bm.fn_share), color: cls(bm.fn_share, tfn, true) },
+      { label: 'Target FP', value: fmtPct(tfp) },
+      { label: 'Target FN', value: fmtPct(tfn) }
     ];
-    document.getElementById('kpis').innerHTML = kpis.map(k =>
-      `<span class="kpi"><div class="label">${k[0]}</div><div class="value ${k[2]||''}">${k[1]}</div></span>`
-    ).join('');
+
+    document.getElementById('kpis').innerHTML = kpiData.map(k => `
+      <div class="bg-card rounded-lg p-3 flex flex-col justify-center border border-gray-700">
+        <div class="text-[10px] text-muted uppercase tracking-wider mb-1">${k.label}</div>
+        <div class="text-lg font-bold text-gray-200 ${k.color || ''}">${k.value}</div>
+      </div>
+    `).join('');
 
     // Status
-    const rows = [
-      ['mode', s.mode || 'autopilot'],
-      ['scoring model', s.scoring_model],
-      ['rubric model', s.rubric_model],
-      ['best version', s.best_version],
-      ['current version', s.rubric_version],
-      ['processed', fmtCount(s.processed_rows ?? s.processed, s.total_rows)],
-      ['baseline match', fmtPct(bam.match_rate)],
-      ['baseline fp', fmtPct(bam.fp_share)],
-      ['baseline fn', fmtPct(bam.fn_share)],
-      ['current match', fmtPct(cm.match_rate)],
-      ['current fp', fmtPct(cm.fp_share)],
-      ['current fn', fmtPct(cm.fn_share)],
+    const statusData = [
+      { k: 'Mode', v: s.mode || 'autopilot' },
+      { k: 'Scoring Model', v: s.scoring_model },
+      { k: 'Rubric Model', v: s.rubric_model },
+      { k: 'Best Version', v: s.best_version },
+      { k: 'Current Version', v: s.rubric_version },
+      { k: 'Processed', v: fmtCount(s.processed_rows ?? s.processed, s.total_rows) },
+      { k: 'Baseline Match', v: fmtPct(bam.match_rate) },
+      { k: 'Baseline FP', v: fmtPct(bam.fp_share) },
+      { k: 'Baseline FN', v: fmtPct(bam.fn_share) },
+      { k: 'Current Match', v: fmtPct(cm.match_rate) },
+      { k: 'Current FP', v: fmtPct(cm.fp_share) },
+      { k: 'Current FN', v: fmtPct(cm.fn_share) },
     ];
-    document.getElementById('status').innerHTML = rows.map(r =>
-      `<div class="k">${r[0]}</div><div class="v">${r[1] ?? '—'}</div>`
-    ).join('');
+
+    document.getElementById('status').innerHTML = statusData.map(r => `
+      <div class="flex flex-col py-1 border-b border-gray-800 last:border-0 sm:border-0">
+        <span class="text-muted text-xs">${r.k}</span>
+        <span class="text-gray-200">${r.v ?? '—'}</span>
+      </div>
+    `).join('');
 
     // Iter metrics
     const bestIter = (d.iters || []).reduce((b, r) => (b == null || (r.combined_error != null && r.combined_error < b.combined_error) ? r : b), null);
-    const body = (d.iters || []).map(r => {
-      const isBest = bestIter && r.iteration_dir === bestIter.iteration_dir;
-      return `<tr class="${isBest ? 'best' : ''}"><td>${r.iteration_dir || ''}</td>
-        <td>${fmtPct(r.match_rate)}</td>
-        <td class="${cls(r.fp_share, tfp, true)}">${fmtPct(r.fp_share)}</td>
-        <td class="${cls(r.fn_share, tfn, true)}">${fmtPct(r.fn_share)}</td>
-        <td>${fmtPct((r.match_rate||0)+(r.fp_share||0)+(r.fn_share||0))}</td>
-        <td>${r.separation != null ? Number(r.separation).toFixed(2) : '—'}</td>
-        <td>${r.combined_error != null ? Number(r.combined_error).toFixed(4) : '—'}</td>
-      </tr>`;
-    }).join('');
-    document.querySelector('#iters tbody').innerHTML = body || '<tr><td colspan=7 class="muted">not an autopilot run</td></tr>';
+
+    let tbodyHtml = '';
+    if (!d.iters || d.iters.length === 0) {
+      tbodyHtml = '<tr><td colspan="7" class="px-4 py-3 text-center text-muted italic">Not an autopilot run</td></tr>';
+    } else {
+      tbodyHtml = d.iters.map(r => {
+        const isBest = bestIter && r.iteration_dir === bestIter.iteration_dir;
+        const rowClass = isBest ? 'table-row-best' : 'hover:bg-gray-800 transition-colors';
+        return `
+          <tr class="${rowClass}">
+            <td class="px-4 py-2 border-b border-gray-800 text-gray-300">${r.iteration_dir || ''}</td>
+            <td class="px-4 py-2 border-b border-gray-800 text-gray-300">${fmtPct(r.match_rate)}</td>
+            <td class="px-4 py-2 border-b border-gray-800 ${cls(r.fp_share, tfp, true)}">${fmtPct(r.fp_share)}</td>
+            <td class="px-4 py-2 border-b border-gray-800 ${cls(r.fn_share, tfn, true)}">${fmtPct(r.fn_share)}</td>
+            <td class="px-4 py-2 border-b border-gray-800 text-gray-300">${fmtPct((r.match_rate||0)+(r.fp_share||0)+(r.fn_share||0))}</td>
+            <td class="px-4 py-2 border-b border-gray-800 text-gray-300">${r.separation != null ? Number(r.separation).toFixed(2) : '—'}</td>
+            <td class="px-4 py-2 border-b border-gray-800 text-gray-300">${r.combined_error != null ? Number(r.combined_error).toFixed(4) : '—'}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+    document.querySelector('#iters tbody').innerHTML = tbodyHtml;
 
     document.getElementById('rows').textContent = (d.rows || []).join('\\n') || '(no rows yet)';
     document.getElementById('events').textContent = (d.events || []).join('\\n') || '(no events)';
   } catch (e) {
-    document.getElementById('updated').textContent = 'refresh failed: ' + e;
+    document.getElementById('updated').textContent = 'Refresh failed: ' + e;
+  }
+}
+
+async function submitLinkedHelper(e) {
+  e.preventDefault();
+  const form = e.target;
+  const statusEl = document.getElementById('uploadStatus');
+  const btn = document.getElementById('submitBtn');
+
+  const gdriveLink = document.getElementById('gdriveLink').value.trim();
+  const fileInput = document.getElementById('csvFile');
+  const file = fileInput.files[0];
+
+  if (!gdriveLink && !file) {
+    statusEl.textContent = 'Please provide a Google Drive link or select a CSV file.';
+    statusEl.className = 'text-xs mt-2 text-red-400 block';
+    return;
+  }
+
+  statusEl.textContent = 'Uploading...';
+  statusEl.className = 'text-xs mt-2 text-blue-400 block';
+  btn.disabled = true;
+  btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+  try {
+    const formData = new FormData();
+    if (gdriveLink) {
+      formData.append('gdrive_link', gdriveLink);
+    }
+    if (file) {
+      formData.append('csv_file', file);
+    }
+
+    const response = await fetch('/api/upload_linkedhelper', {
+      method: 'POST',
+      body: formData
+    });
+
+    const result = await response.json();
+
+    if (response.ok) {
+      statusEl.textContent = result.message || 'Upload successful!';
+      statusEl.className = 'text-xs mt-2 text-green-400 block';
+      form.reset();
+    } else {
+      statusEl.textContent = 'Error: ' + (result.error || 'Upload failed');
+      statusEl.className = 'text-xs mt-2 text-red-400 block';
+    }
+  } catch (err) {
+    statusEl.textContent = 'Error: ' + err.message;
+    statusEl.className = 'text-xs mt-2 text-red-400 block';
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('opacity-50', 'cursor-not-allowed');
+    setTimeout(() => {
+      if(statusEl.className.includes('green')) statusEl.classList.add('hidden');
+    }, 5000);
   }
 }
 
@@ -277,8 +399,62 @@ setInterval(refresh, 2000);
 </body>
 </html>"""
 
+def extract_gdrive_id(url: str) -> str | None:
+    match = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+    if not match:
+        match = re.search(r'id=([a-zA-Z0-9_-]+)', url)
+    return match.group(1) if match else None
+
+def download_gdrive_csv(file_id: str, dest_path: Path) -> None:
+    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    req = urllib.request.Request(download_url, headers={'User-Agent': 'Mozilla/5.0'})
+    with urllib.request.urlopen(req) as response:
+        with dest_path.open('wb') as out_file:
+            out_file.write(response.read())
+
+
+def parse_multipart_data(content_type: str, body: bytes) -> tuple[dict, dict]:
+    match = re.search(r'boundary=([^;]+)', content_type)
+    if not match:
+        raise ValueError("No boundary found in content type")
+
+    boundary = match.group(1).encode()
+    parts = body.split(b'--' + boundary)
+
+    files = {}
+    fields = {}
+
+    for part in parts:
+        if not part.strip() or part == b'--\r\n':
+            continue
+
+        try:
+            headers_part, content = part.split(b'\r\n\r\n', 1)
+            content = content[:-2] # Remove trailing \r\n
+
+            headers = headers_part.decode('utf-8')
+            disposition_match = re.search(r'Content-Disposition: form-data; (.*?)\r\n', headers + '\r\n')
+
+            if disposition_match:
+                disposition = disposition_match.group(1)
+                name_match = re.search(r'name="([^"]+)"', disposition)
+                filename_match = re.search(r'filename="([^"]+)"', disposition)
+
+                if name_match:
+                    name = name_match.group(1)
+                    if filename_match:
+                        filename = filename_match.group(1)
+                        if filename: # Don't save empty file inputs
+                            files[name] = {"filename": filename, "content": content}
+                    else:
+                        fields[name] = content.decode('utf-8').strip()
+        except Exception:
+            pass
+
+    return fields, files
 
 class Handler(BaseHTTPRequestHandler):
+
     def log_message(self, *a, **kw):
         return
 
@@ -308,6 +484,116 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def do_POST(self):
+        if self.path == "/api/upload_linkedhelper":
+            content_type = self.headers.get('Content-Type', '')
+            try:
+                # Ensure the company sources directory exists
+                sources_dir = Path("data/company_sources")
+                sources_dir.mkdir(parents=True, exist_ok=True)
+
+                if content_type.startswith('multipart/form-data'):
+                    content_length = int(self.headers.get('Content-Length', '0'))
+                    body = self.rfile.read(content_length)
+                    fields, files = parse_multipart_data(content_type, body)
+
+                    saved_files = []
+
+                    # Handle File Upload
+                    if 'csv_file' in files:
+                        file_item = files['csv_file']
+                        filename = file_item['filename']
+                        if not filename.endswith('.csv'):
+                            filename += '.csv'
+
+                        # Generate unique filename
+                        import time
+                        ts = int(time.time())
+                        safe_name = f"upload_{ts}_{re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)}"
+                        dest_path = sources_dir / safe_name
+
+                        with dest_path.open('wb') as f:
+                            f.write(file_item['content'])
+
+                        saved_files.append(safe_name)
+
+                    # Handle GDrive Link
+                    if 'gdrive_link' in fields and fields['gdrive_link']:
+                        gdrive_url = fields['gdrive_link'].strip()
+                        file_id = extract_gdrive_id(gdrive_url)
+
+                        if not file_id:
+                            self._send_json_response(400, {"error": "Invalid Google Drive link"})
+                            return
+
+                        import time
+                        ts = int(time.time())
+                        dest_path = sources_dir / f"gdrive_{ts}.csv"
+
+                        try:
+                            download_gdrive_csv(file_id, dest_path)
+                            saved_files.append(dest_path.name)
+                        except Exception as e:
+                            self._send_json_response(500, {"error": f"Failed to download from Google Drive: {str(e)}"})
+                            return
+
+                    if not saved_files:
+                        self._send_json_response(400, {"error": "No file or valid link provided"})
+                        return
+
+                    self._send_json_response(200, {
+                        "message": f"Successfully processed {len(saved_files)} file(s)",
+                        "files": saved_files
+                    })
+                    return
+
+                # Handle JSON Payload (Webhook)
+                elif content_type == 'application/json':
+                    content_length = int(self.headers.get('Content-Length', 0))
+                    post_data = self.rfile.read(content_length)
+                    data = json.loads(post_data.decode('utf-8'))
+
+                    gdrive_url = data.get('gdrive_link')
+                    if gdrive_url:
+                        file_id = extract_gdrive_id(gdrive_url)
+                        if not file_id:
+                            self._send_json_response(400, {"error": "Invalid Google Drive link"})
+                            return
+
+                        import time
+                        ts = int(time.time())
+                        dest_path = sources_dir / f"webhook_gdrive_{ts}.csv"
+
+                        try:
+                            download_gdrive_csv(file_id, dest_path)
+                            self._send_json_response(200, {"message": "Successfully downloaded CSV from Google Drive link"})
+                        except Exception as e:
+                            self._send_json_response(500, {"error": f"Failed to download: {str(e)}"})
+                        return
+
+                    self._send_json_response(400, {"error": "JSON payload must contain 'gdrive_link'"})
+                    return
+
+                else:
+                    self._send_json_response(415, {"error": "Unsupported Media Type"})
+                    return
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                self._send_json_response(500, {"error": str(e)})
+                return
+
+        self.send_response(404)
+        self.end_headers()
+
+    def _send_json_response(self, status_code: int, payload: dict):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 def main() -> None:
     global WORKDIR
@@ -321,7 +607,6 @@ def main() -> None:
     srv = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"serving http://127.0.0.1:{args.port}/ (workdir={WORKDIR})", flush=True)
     srv.serve_forever()
-
 
 if __name__ == "__main__":
     main()
