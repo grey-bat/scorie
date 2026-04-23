@@ -153,7 +153,9 @@ def filter_rows_needing_live_update(
     report = []
 
     publish("matching")
-    for _, row in delta.iterrows():
+    delta_cols = delta.columns
+    for row_tuple in delta.itertuples(index=False, name=None):
+        row = dict(zip(delta_cols, row_tuple))
         processed_rows += 1
         rid = row.get("Raw ID", "")
         email = row.get("Best Email", "")
