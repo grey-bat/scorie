@@ -191,7 +191,25 @@ def batch_values(values, size: int = 25):
 
 def lookup_pages_by_property_values(client: NotionClient, data_source_id: str, property_name: str, property_type: str, values, batch_size: int = 25):
     cache = defaultdict(list)
-    for group in batch_values(values, batch_size):
+    values_list = list(values)
+
+    if not values_list:
+        return cache
+
+    # Heuristic: if we have more than 100 values to look up, a pure cache sync (fetching all pages)
+    # is often faster and uses fewer API calls than N+1 chunked OR filter queries.
+    if len(values_list) > 100:
+        values_set = set(values_list)
+        for page in query_all_pages(client, data_source_id):
+            props = page.get("properties", {})
+            plain = notion_plain_text(props.get(property_name, {}))
+            if plain in values_set:
+                key = normalize_email(plain) if property_type == "email" else normalize_key(plain)
+                if key:
+                    cache[key].append(page)
+        return cache
+
+    for group in batch_values(values_list, batch_size):
         if not group:
             continue
         if len(group) == 1:
@@ -382,9 +400,18 @@ def build_write_jobs(
 
     publish("matching")
     write_jobs: list = []
-    for row_number, (_, row) in enumerate(delta.iterrows(), start=1):
-        mk = row.get("Match Key", "")
-        rid, email = row["Raw ID"], row["Best Email"]
+
+    match_key_idx = delta.columns.get_loc("Match Key") + 1 if "Match Key" in delta.columns else None
+    raw_id_idx = delta.columns.get_loc("Raw ID") + 1 if "Raw ID" in delta.columns else None
+    best_email_idx = delta.columns.get_loc("Best Email") + 1 if "Best Email" in delta.columns else None
+
+    payload_cols = required_targets + optional_targets
+    payload_indices = {col: delta.columns.get_loc(col) + 1 for col in payload_cols if col in delta.columns}
+
+    for row_number, row in enumerate(delta.itertuples(), start=1):
+        mk = row[match_key_idx] if match_key_idx is not None else ""
+        rid = row[raw_id_idx] if raw_id_idx is not None else None
+        email = row[best_email_idx] if best_email_idx is not None else None
         page = None
         if rid:
             matches = raw_cache.get(rid, [])
@@ -413,8 +440,7 @@ def build_write_jobs(
             publish("matching")
             continue
         page_id = page["id"]
-        payload_cols = required_targets + optional_targets
-        payload = {"properties": {col: notion_set_payload(target_types[col], row[col]) for col in payload_cols if col in row.index}}
+        payload = {"properties": {col: notion_set_payload(target_types[col], row[idx]) for col, idx in payload_indices.items()}}
         if page_matches_payload(page, payload, target_types):
             counters["noop"] += 1
             logs.append({"Match Key": mk, "status": "noop", "page_id": page_id})

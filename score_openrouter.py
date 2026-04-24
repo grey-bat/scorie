@@ -649,6 +649,98 @@ def open_api_session(args) -> "aiohttp.ClientSession | None":
     return aiohttp.ClientSession(headers=headers, timeout=timeout)
 
 
+def _flush_batch_sync(
+    batch_out: list,
+    *,
+    meta_by_index: dict,
+    results_csv: Path,
+    progress_jsonl: Path,
+    counter_ref: list,
+    scoring_mode: str,
+    composite_config,
+) -> None:
+    with open(results_csv, "a", newline="", encoding="utf-8") as fcsv, \
+            open(progress_jsonl, "a", encoding="utf-8") as fj:
+        writer = csv.DictWriter(fcsv, fieldnames=score_fieldnames(scoring_mode))
+        for item in batch_out:
+            meta = meta_by_index[item["_seq"]]
+            row = {
+                "Match Key": item["Match Key"],
+                "URN": normalize_text(meta.get("URN", "")),
+                "Raw ID": normalize_text(meta.get("Raw ID", "")),
+                "Best Email": normalize_text(meta.get("Best Email", "")),
+                "score_track": scoring_mode,
+            }
+            if scoring_mode == "autopilot_direct_100":
+                # Only write the dims the active rubric actually produces.
+                for field in DIRECT_POINT_HELP:
+                    row[field] = item.get(field, 0)
+                row["fo_total"] = family_office_total(row)
+                row["ft_total"] = fintech_total(row)
+                row["direct_score"] = row["ft_total"]
+                row["overall_direct_score"] = direct_score(row, composite_config.direct_point_maps)
+                row["score_band"] = score_band(row["direct_score"], composite_config.score_bands)
+            else:
+                row.update({
+                    "fo_persona": item["fo_persona"],
+                    "ft_persona": item["ft_persona"],
+                    "allocator": item["allocator"],
+                    "access": item["access"],
+                    "company_fit": item["company_fit"],
+                })
+                row["weighted_score"] = weighted_score(row, composite_config.weights)
+                row["legacy_weighted_score"] = legacy_weighted_score(row, composite_config.legacy_weights)
+                row["score_band"] = score_band(row["weighted_score"], composite_config.score_bands)
+            writer.writerow(row)
+            counter_ref[0] += 1
+            display_row = {
+                "done": counter_ref[0],
+                "Full Name": meta.get("Full Name", ""),
+                "Current Company": meta.get("Current Company", ""),
+                "Manual": normalize_text(meta.get("Manual", "")),
+                "Degree": meta.get("Degree", ""),
+                "Headline": meta.get("Headline", ""),
+                "Summary": meta.get("Summary", ""),
+            }
+            if scoring_mode == "autopilot_direct_100":
+                # Role/access/fintech/allocator may be absent from 2-axis
+                # rubrics; default to blank so the live table still renders.
+                role_fit = item.get("role_fit", "")
+                fo_total = row["fo_total"]
+                ft_total = row["ft_total"]
+                display_row.update({
+                    "fo_total": fo_total,
+                    "ft_total": ft_total,
+                    "score_band": row["score_band"],
+                    "allocator": item.get("allocator_power", ""),
+                    "company_fit": item.get("company_fit", ""),
+                    "ft_relevance": item.get("fintech_relevance", ""),
+                    "access": item.get("access", ""),
+                    "role_fit": role_fit,
+                })
+            else:
+                display_row.update({
+                    "fo_persona": item["fo_persona"],
+                    "ft_persona": item["ft_persona"],
+                    "allocator": item["allocator"],
+                    "company_fit": item["company_fit"],
+                    "access": item["access"],
+                })
+            progress_row = dict(row)
+            progress_row["Full Name"] = normalize_text(meta.get("Full Name", ""))
+            progress_row["Current Company"] = normalize_text(meta.get("Current Company", ""))
+            progress_row["Current Title"] = normalize_text(meta.get("Current Title", ""))
+            progress_row["lead_score"] = row.get("direct_score", row.get("weighted_score", ""))
+            if scoring_mode == "autopilot_direct_100":
+                progress_row["fo_total"] = fo_total
+                progress_row["ft_total"] = ft_total
+                progress_row["overall_direct_score"] = row["overall_direct_score"]
+                progress_row["ft_relevance"] = item.get("fintech_relevance", "")
+            fj.write(json.dumps(progress_row, ensure_ascii=False) + "\n")
+            row_line = make_autopilot_row_line(display_row) if scoring_mode == "autopilot_direct_100" else make_row_line(display_row)
+            print(row_line, flush=True)
+
+
 async def _flush_batch(
     batch_out: list,
     *,
@@ -661,86 +753,16 @@ async def _flush_batch(
     composite_config,
 ) -> None:
     async with io_lock:
-        with open(results_csv, "a", newline="", encoding="utf-8") as fcsv, \
-                open(progress_jsonl, "a", encoding="utf-8") as fj:
-            writer = csv.DictWriter(fcsv, fieldnames=score_fieldnames(scoring_mode))
-            for item in batch_out:
-                meta = meta_by_index[item["_seq"]]
-                row = {
-                    "Match Key": item["Match Key"],
-                    "URN": normalize_text(meta.get("URN", "")),
-                    "Raw ID": normalize_text(meta.get("Raw ID", "")),
-                    "Best Email": normalize_text(meta.get("Best Email", "")),
-                    "score_track": scoring_mode,
-                }
-                if scoring_mode == "autopilot_direct_100":
-                    # Only write the dims the active rubric actually produces.
-                    for field in DIRECT_POINT_HELP:
-                        row[field] = item.get(field, 0)
-                    row["fo_total"] = family_office_total(row)
-                    row["ft_total"] = fintech_total(row)
-                    row["direct_score"] = row["ft_total"]
-                    row["overall_direct_score"] = direct_score(row, composite_config.direct_point_maps)
-                    row["score_band"] = score_band(row["direct_score"], composite_config.score_bands)
-                else:
-                    row.update({
-                        "fo_persona": item["fo_persona"],
-                        "ft_persona": item["ft_persona"],
-                        "allocator": item["allocator"],
-                        "access": item["access"],
-                        "company_fit": item["company_fit"],
-                    })
-                    row["weighted_score"] = weighted_score(row, composite_config.weights)
-                    row["legacy_weighted_score"] = legacy_weighted_score(row, composite_config.legacy_weights)
-                    row["score_band"] = score_band(row["weighted_score"], composite_config.score_bands)
-                writer.writerow(row)
-                counter_ref[0] += 1
-                display_row = {
-                    "done": counter_ref[0],
-                    "Full Name": meta.get("Full Name", ""),
-                    "Current Company": meta.get("Current Company", ""),
-                    "Manual": normalize_text(meta.get("Manual", "")),
-                    "Degree": meta.get("Degree", ""),
-                    "Headline": meta.get("Headline", ""),
-                    "Summary": meta.get("Summary", ""),
-                }
-                if scoring_mode == "autopilot_direct_100":
-                    # Role/access/fintech/allocator may be absent from 2-axis
-                    # rubrics; default to blank so the live table still renders.
-                    role_fit = item.get("role_fit", "")
-                    fo_total = row["fo_total"]
-                    ft_total = row["ft_total"]
-                    display_row.update({
-                        "fo_total": fo_total,
-                        "ft_total": ft_total,
-                        "score_band": row["score_band"],
-                        "allocator": item.get("allocator_power", ""),
-                        "company_fit": item.get("company_fit", ""),
-                        "ft_relevance": item.get("fintech_relevance", ""),
-                        "access": item.get("access", ""),
-                        "role_fit": role_fit,
-                    })
-                else:
-                    display_row.update({
-                        "fo_persona": item["fo_persona"],
-                        "ft_persona": item["ft_persona"],
-                        "allocator": item["allocator"],
-                        "company_fit": item["company_fit"],
-                        "access": item["access"],
-                    })
-                progress_row = dict(row)
-                progress_row["Full Name"] = normalize_text(meta.get("Full Name", ""))
-                progress_row["Current Company"] = normalize_text(meta.get("Current Company", ""))
-                progress_row["Current Title"] = normalize_text(meta.get("Current Title", ""))
-                progress_row["lead_score"] = row.get("direct_score", row.get("weighted_score", ""))
-                if scoring_mode == "autopilot_direct_100":
-                    progress_row["fo_total"] = fo_total
-                    progress_row["ft_total"] = ft_total
-                    progress_row["overall_direct_score"] = row["overall_direct_score"]
-                    progress_row["ft_relevance"] = item.get("fintech_relevance", "")
-                fj.write(json.dumps(progress_row, ensure_ascii=False) + "\n")
-                row_line = make_autopilot_row_line(display_row) if scoring_mode == "autopilot_direct_100" else make_row_line(display_row)
-                print(row_line, flush=True)
+        await asyncio.to_thread(
+            _flush_batch_sync,
+            batch_out,
+            meta_by_index=meta_by_index,
+            results_csv=results_csv,
+            progress_jsonl=progress_jsonl,
+            counter_ref=counter_ref,
+            scoring_mode=scoring_mode,
+            composite_config=composite_config,
+        )
 
 
 async def _process_batch(
