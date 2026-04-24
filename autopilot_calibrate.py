@@ -797,7 +797,7 @@ def generate_rubric_candidate(
                 "https://openrouter.ai/api/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
                 json=payload,
-                timeout=180,
+                timeout=(10, 180),
             )
             if response.status_code in (402, 429) or response.status_code >= 500:
                 wait = 10 * (attempt + 1)
