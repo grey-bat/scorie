@@ -6,8 +6,6 @@ weight changes, not prose-level edits. Everything here is LLM-free.
 
 from __future__ import annotations
 
-import copy
-import math
 import re
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -212,7 +210,6 @@ def parse_rubric(text: str) -> RubricSpec:
     lines = text.splitlines()
     spec = RubricSpec()
 
-    section_stack: list[tuple[int, str]] = []  # (level, normalized name)
     section_buffers: dict[str, list[str]] = {}
 
     current_top = ""
