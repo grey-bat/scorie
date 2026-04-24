@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 from build_delta import build_scoring_frames, load_scoring_frames
 from update_notion import NotionClient, build_match_caches, page_matches_payload, query_all_pages, resolve_data_source_id
-from utils import RAW_SCORE_COLUMNS, ensure_dir, notion_set_payload
+from utils import RAW_SCORE_COLUMNS, notion_set_payload
 from writeback_status import build_writeback_status, now_iso, write_json_atomic
 
 
