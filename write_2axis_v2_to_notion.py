@@ -12,7 +12,6 @@ from update_notion import (
     apply_write_job,
     duplicate_lookup_rows,
     lookup_pages_by_property_values,
-    notion_plain_text,
     page_matches_payload,
     resolve_data_source_id,
 )
