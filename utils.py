@@ -4,7 +4,7 @@ import os
 import re
 import unicodedata
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable
+from typing import Any, Dict
 from urllib.parse import unquote
 
 MODEL_CONTEXT_COLUMNS = [
