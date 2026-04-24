@@ -1,5 +1,6 @@
 import argparse
 import pandas as pd
+import numpy as np
 from utils import DIRECT_SCORE_COLUMNS, RAW_SCORE_COLUMNS, ensure_dir, normalize_key, normalize_email, canonical_match_key
 
 
@@ -10,6 +11,35 @@ def same_score(a, b) -> bool:
         return int(float(a)) == int(float(b))
     except Exception:
         return str(a).strip() == str(b).strip()
+
+
+def same_score_vectorized(s1: pd.Series, s2: pd.Series) -> pd.Series:
+    """Vectorized version of same_score."""
+    # 1. Handle NaN cases (pd.isna handles both np.nan and None)
+    both_nan = s1.isna() & s2.isna()
+
+    # 2. Try numeric comparison: int(float(a)) == int(float(b))
+    # Coerce to numeric; those that fail become NaN.
+    s1_f = pd.to_numeric(s1, errors='coerce')
+    s2_f = pd.to_numeric(s2, errors='coerce')
+
+    # same_score's try block succeeds if both can be converted to float AND then to int.
+    # int(float(inf)) raises OverflowError, so we only use numeric path for finite values.
+    both_finite = np.isfinite(s1_f) & np.isfinite(s2_f)
+
+    # 3. Default to stripped string comparison
+    s1_s = s1.astype(str).str.strip()
+    s2_s = s2.astype(str).str.strip()
+    res = (s1_s == s2_s)
+
+    # 4. Override with numeric comparison (int truncation) where both are finite
+    if both_finite.any():
+        res[both_finite] = (s1_f[both_finite].astype(int) == s2_f[both_finite].astype(int))
+
+    # 5. Override with True where both were NaN
+    res[both_nan] = True
+
+    return res
 
 
 def load_scoring_frames(full_path: str, prepared_path: str, scores_path: str):
@@ -90,24 +120,31 @@ def build_scoring_frames(full, prepared, scores, include_all: bool = False):
     if "score_track" not in merged.columns:
         merged["score_track"] = "legacy_raw_weighted"
 
-    changed_mask = []
     company_fit_supported = "company_fit" in score_map.columns
-    for _, row in merged.iterrows():
-        changed = False
-        changed |= not same_score(row.get("Degree"), row.get(prepared_degree_col))
-        changed |= not same_score(row.get("Alumni Signal"), row.get(prepared_alumni_col))
-        if direct_mode:
-            for score_col, target_col in DIRECT_SCORE_COLUMNS.items():
-                changed |= not same_score(row.get(target_col), row.get(score_col, ""))
-        else:
-            changed |= not same_score(row.get(RAW_SCORE_COLUMNS["fo_persona"]), row["fo_persona"])
-            changed |= not same_score(row.get(RAW_SCORE_COLUMNS["ft_persona"]), row["ft_persona"])
-            changed |= not same_score(row.get(RAW_SCORE_COLUMNS["allocator"]), row["allocator"])
-            changed |= not same_score(row.get(RAW_SCORE_COLUMNS["access"]), row["access"])
-            if company_fit_supported:
-                changed |= not same_score(row.get("Company Fit Score"), row.get("company_fit", ""))
-        changed_mask.append(changed)
-    changed_mask = pd.Series(changed_mask, dtype=bool)
+
+    # Vectorized change detection
+    # Initialize changed_mask as all False
+    changed_mask = pd.Series(False, index=merged.index)
+
+    # Core columns
+    changed_mask |= ~same_score_vectorized(merged["Degree"], merged[prepared_degree_col])
+    changed_mask |= ~same_score_vectorized(merged["Alumni Signal"], merged[prepared_alumni_col])
+
+    if direct_mode:
+        for score_col, target_col in DIRECT_SCORE_COLUMNS.items():
+            # If column is missing from merged, it defaults to empty string/0
+            s1 = merged[target_col] if target_col in merged.columns else pd.Series(0, index=merged.index)
+            s2 = merged[score_col] if score_col in merged.columns else pd.Series("", index=merged.index)
+            changed_mask |= ~same_score_vectorized(s1, s2)
+    else:
+        changed_mask |= ~same_score_vectorized(merged[RAW_SCORE_COLUMNS["fo_persona"]], merged["fo_persona"])
+        changed_mask |= ~same_score_vectorized(merged[RAW_SCORE_COLUMNS["ft_persona"]], merged["ft_persona"])
+        changed_mask |= ~same_score_vectorized(merged[RAW_SCORE_COLUMNS["allocator"]], merged["allocator"])
+        changed_mask |= ~same_score_vectorized(merged[RAW_SCORE_COLUMNS["access"]], merged["access"])
+        if company_fit_supported:
+            s1 = merged["Company Fit Score"] if "Company Fit Score" in merged.columns else pd.Series("", index=merged.index)
+            s2 = merged["company_fit"]
+            changed_mask |= ~same_score_vectorized(s1, s2)
 
     zero_series = pd.Series([0] * len(merged), index=merged.index)
     delta = pd.DataFrame({
