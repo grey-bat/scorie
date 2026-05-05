@@ -535,6 +535,8 @@ def deterministic_mock(records: list[dict], scoring_mode: str = "legacy_raw_weig
             out.append({
                 "URN": rec.get("member_id") or rec.get("urn", ""),
                 "member_id": rec.get("member_id") or rec.get("urn", ""),
+                "Match Key": rec.get("_match_key", ""),
+                "Raw ID": rec.get("_raw_id", ""),
                 "company_fit": DIRECT_POINT_HELP["company_fit"][max(0, min(4, company_fit - 1))],
                 "family_office_relevance": DIRECT_POINT_HELP["family_office_relevance"][max(0, min(4, fo - 1))],
                 "fintech_relevance": DIRECT_POINT_HELP["fintech_relevance"][max(0, min(4, ft - 1))],
@@ -546,6 +548,8 @@ def deterministic_mock(records: list[dict], scoring_mode: str = "legacy_raw_weig
         out.append({
             "URN": rec.get("member_id") or rec.get("urn", ""),
             "member_id": rec.get("member_id") or rec.get("urn", ""),
+            "Match Key": rec.get("_match_key", ""),
+            "Raw ID": rec.get("_raw_id", ""),
             "fo_persona": min(5, fo),
             "ft_persona": min(5, ft),
             "allocator": min(5, alloc),
@@ -784,6 +788,7 @@ async def _process_batch(
         try:
             if args.mock:
                 batch_out = deterministic_mock(batch, scoring_mode=scoring_mode)
+                missing = []
             else:
                 matched, missing = await call_openrouter(
                     session,

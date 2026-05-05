@@ -1,3 +1,4 @@
+from utils import canonicalize_identifier
 import unittest
 from datetime import datetime, timezone
 from utils import parse_ts
@@ -38,11 +39,9 @@ class TestUtils(unittest.TestCase):
             with self.subTest(input_str=input_str):
                 self.assertEqual(parse_ts(input_str), expected_dt)
 
-if __name__ == '__main__':
-from utils import canonicalize_identifier
 
 
-class TestUtils(unittest.TestCase):
+
     def test_canonicalize_identifier(self):
         test_cases = [
             # Basic string
